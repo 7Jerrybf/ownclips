@@ -25,11 +25,9 @@ pub struct Config {
     pub killfeed_region: Option<RegionPct>,
     /// Where recordings go; None means Videos\OwnClips.
     pub recordings_dir: Option<String>,
-    /// Seconds of footage kept before the first and after the last kill.
+    /// Highlight ranges: seconds before the first and after the last kill.
     pub clip_pre_seconds: f64,
     pub clip_post_seconds: f64,
-    /// Cut kill clips automatically when a match ends.
-    pub auto_clip: bool,
     /// Built-in recorder settings.
     pub audio_mode: AudioMode,
     pub video_fps: u32,
@@ -43,7 +41,6 @@ impl Default for Config {
             recordings_dir: None,
             clip_pre_seconds: 8.0,
             clip_post_seconds: 3.0,
-            auto_clip: true,
             audio_mode: AudioMode::Game,
             video_fps: 60,
             video_bitrate_mbps: 20,

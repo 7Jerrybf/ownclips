@@ -3,7 +3,8 @@
 // the recorded frames, and stops when the match is over. Each recording
 // gets a `<recording>.events.json` next to it with the match info and every
 // event's time in the video; it is rewritten after each event so a crash
-// loses at most the video's ending. Clips are cut automatically afterwards.
+// loses at most the video's ending. Highlights are just ranges around the
+// kill events (the app computes them); nothing is cut automatically.
 //
 // `AutoRecorder::tick` drives everything, so the same logic can run from
 // the command line or from the app's background thread.
@@ -17,7 +18,6 @@ use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::capture;
-use crate::clip;
 use crate::config::{self, RegionPct};
 use crate::gamestate::{self, GameEvent, LogWatcher};
 use crate::killfeed::{self, RowCounter};
@@ -83,7 +83,7 @@ pub enum Notice {
     Processing { video: PathBuf },
     /// A recording left unfinished by a crash was completed.
     Recovered { video: PathBuf },
-    Stopped { video: PathBuf, clips: usize },
+    Stopped { video: PathBuf },
     Skipped { reason: String },
     Error(String),
 }
@@ -227,18 +227,10 @@ impl AutoRecorder {
         let tx = self.done_tx.clone();
         let video = m.video.clone();
         self.jobs.push(thread::spawn(move || {
-            if let Err(e) = stopped.finish() {
-                let _ = tx.send(Notice::Error(format!("{e:#}")));
-                return;
-            }
-            let clips = match config::load() {
-                Ok(cfg) if cfg.auto_clip => clip::clip_match(&video, &cfg).unwrap_or_else(|e| {
-                    let _ = tx.send(Notice::Error(format!("自動裁切失敗: {e:#}")));
-                    0
-                }),
-                _ => 0,
-            };
-            let _ = tx.send(Notice::Stopped { video, clips });
+            let _ = tx.send(match stopped.finish() {
+                Ok(_) => Notice::Stopped { video },
+                Err(e) => Notice::Error(format!("{e:#}")),
+            });
         }));
         vec![Notice::Processing { video: m.video }]
     }
@@ -316,7 +308,7 @@ pub fn run() -> Result<()> {
     let quit = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let quit2 = quit.clone();
     ctrlc::set_handler(move || quit2.store(true, std::sync::atomic::Ordering::Relaxed))?;
-    println!("等待 Valorant 對局開始...(會自動錄影,對局結束自動停止並裁切片段。按 Ctrl+C 結束)");
+    println!("等待 Valorant 對局開始...(會自動錄影,對局結束自動停止。按 Ctrl+C 結束)");
     loop {
         let quitting = quit.load(std::sync::atomic::Ordering::Relaxed);
         let notices = if quitting { auto.shutdown() } else { auto.tick() };
@@ -331,8 +323,8 @@ pub fn run() -> Result<()> {
                     };
                     println!("  {what} @ {:02}:{:04.1}", (t / 60.0) as u64, t % 60.0);
                 }
-                Notice::Stopped { video, clips } => {
-                    println!("對局結束,錄影已存檔: {}(自動裁出 {clips} 個片段)", video.display());
+                Notice::Stopped { video } => {
+                    println!("對局結束,錄影已存檔: {}", video.display());
                     println!("等待下一場...");
                 }
                 Notice::Processing { .. } => println!("對局結束,正在合成錄影檔..."),

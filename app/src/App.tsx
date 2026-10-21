@@ -1,8 +1,8 @@
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { ClipSummary, MatchSummary, RecorderStatus, Toast } from "./api";
+import type { MatchSummary, RecorderStatus, Toast } from "./api";
 import { api } from "./api";
-import { ClipsView } from "./components/ClipsView";
+import { HighlightsView } from "./components/HighlightsView";
 import { IconClips, IconMatches, IconPlay, IconSettings } from "./components/Icons";
 import { MatchDetail } from "./components/MatchDetail";
 import { MatchesView } from "./components/MatchesView";
@@ -10,13 +10,13 @@ import { SettingsView } from "./components/SettingsView";
 import { Toasts, type ToastItem } from "./components/Toasts";
 import { clock } from "./format";
 
-type Page = "matches" | "clips" | "settings";
+type Page = "matches" | "highlights" | "settings";
 
 export default function App() {
   const [page, setPage] = useState<Page>("matches");
   const [matches, setMatches] = useState<MatchSummary[]>([]);
-  const [clips, setClips] = useState<ClipSummary[]>([]);
-  const [open, setOpen] = useState<MatchSummary | null>(null);
+  const [open, setOpen] = useState<{ match: MatchSummary; range?: [number, number] } | null>(null);
+  const [clipSecs, setClipSecs] = useState<[number, number]>([8, 3]);
   const [status, setStatus] = useState<RecorderStatus | null>(null);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const [calibrated, setCalibrated] = useState(true);
@@ -30,8 +30,10 @@ export default function App() {
 
   const refresh = useCallback(() => {
     api.listMatches().then(setMatches).catch((e) => notify(String(e), "error"));
-    api.listClips().then(setClips).catch(() => {});
-    api.getConfig().then((c) => setCalibrated(!!c.killfeed_region));
+    api.getConfig().then((c) => {
+      setCalibrated(!!c.killfeed_region);
+      setClipSecs([c.clip_pre_seconds, c.clip_post_seconds]);
+    });
   }, [notify]);
 
   useEffect(() => {
@@ -48,9 +50,11 @@ export default function App() {
     return () => unlisten.forEach((p) => p.then((f) => f()));
   }, [refresh, notify]);
 
-  // Keep the open match in sync after a refresh (e.g. new clips).
+  // Keep the open match in sync after a refresh.
   useEffect(() => {
-    if (open) setOpen(matches.find((m) => m.video === open.video) ?? null);
+    if (!open) return;
+    const m = matches.find((x) => x.video === open.match.video);
+    setOpen(m ? { ...open, match: m } : null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [matches]);
 
@@ -71,8 +75,8 @@ export default function App() {
         <button className={`nav-item ${page === "matches" ? "active" : ""}`} onClick={() => go("matches")}>
           <IconMatches /> 對局 <span className="count num">{matches.length}</span>
         </button>
-        <button className={`nav-item ${page === "clips" ? "active" : ""}`} onClick={() => go("clips")}>
-          <IconClips /> 片段 <span className="count num">{clips.length}</span>
+        <button className={`nav-item ${page === "highlights" ? "active" : ""}`} onClick={() => go("highlights")}>
+          <IconClips /> 精華
         </button>
         <button className={`nav-item ${page === "settings" ? "active" : ""}`} onClick={() => go("settings")}>
           <IconSettings /> 設定
@@ -82,20 +86,27 @@ export default function App() {
       </aside>
 
       <main className="main">
-        {page === "matches" &&
-          (open ? (
-            <MatchDetail
-              match={open}
-              clips={clips}
-              onBack={() => setOpen(null)}
-              onClipsChanged={refresh}
-              notify={notify}
-            />
-          ) : (
-            <MatchesView matches={matches} onOpen={setOpen} onChanged={refresh} notify={notify} />
-          ))}
-        {page === "clips" && <ClipsView clips={clips} matches={matches} onChanged={refresh} notify={notify} />}
-        {page === "settings" && <SettingsView notify={notify} />}
+        {open ? (
+          <MatchDetail
+            key={`${open.match.video}@${open.range?.[0] ?? ""}`}
+            match={open.match}
+            pre={clipSecs[0]}
+            post={clipSecs[1]}
+            initialRange={open.range}
+            onBack={() => setOpen(null)}
+            notify={notify}
+          />
+        ) : page === "matches" ? (
+          <MatchesView matches={matches} onOpen={(m) => setOpen({ match: m })} onChanged={refresh} notify={notify} />
+        ) : page === "highlights" ? (
+          <HighlightsView
+            matches={matches}
+            pre={clipSecs[0]}
+            post={clipSecs[1]}
+            onOpen={(h) => setOpen({ match: h.match, range: [h.start, h.end] })}
+          />
+        ) : null}
+        {!open && page === "settings" && <SettingsView notify={notify} onSaved={refresh} />}
       </main>
       <Toasts items={toasts} />
     </div>

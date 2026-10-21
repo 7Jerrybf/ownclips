@@ -128,22 +128,6 @@ pub fn cut_range(video: &Path, start: f64, end: f64, label: &str) -> Result<Path
     Ok(out)
 }
 
-/// Saves one frame of `video` as a JPEG `width` pixels wide. A negative
-/// `at` counts back from the end.
-pub fn grab_frame(video: &Path, at: f64, width: u32, out: &Path) -> Result<()> {
-    let seek = if at < 0.0 { "-sseof" } else { "-ss" };
-    let status = ffmpeg()?
-        .args(["-hide_banner", "-loglevel", "error", "-y", seek, &format!("{at:.2}"), "-i"])
-        .arg(video)
-        .args(["-frames:v", "1", "-vf", &format!("scale={width}:-2"), "-q:v", "4"])
-        .arg(out)
-        .status()?;
-    if !status.success() {
-        return Err(anyhow!("擷取畫面失敗: {}", video.display()));
-    }
-    Ok(())
-}
-
 pub fn ffmpeg_available() -> bool {
     ffmpeg_exe().is_some()
 }

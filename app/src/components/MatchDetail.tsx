@@ -1,11 +1,12 @@
 // One match: the full recording with a marked timeline, the event list,
-// and tools to cut clips (automatic kill clips or a hand-picked range).
+// and its highlight ranges (played straight from the recording; a range can
+// be exported to a file on request).
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ClipSummary, EventKind, MatchSummary } from "../api";
+import type { EventKind, MatchSummary } from "../api";
 import { api, fileUrl } from "../api";
-import { clipAt, clock, count, kindLabel, shortDate } from "../format";
-import { ClipModal } from "./ClipModal";
-import { IconAssist, IconBack, IconDeath, IconKill, IconNext, IconPlay, IconPrev, IconScissors } from "./Icons";
+import { clock, count, kindLabel, shortDate } from "../format";
+import { type Highlight, highlights, killLabel } from "../highlights";
+import { IconAssist, IconBack, IconDeath, IconFolder, IconKill, IconNext, IconPlay, IconPrev, IconScissors } from "./Icons";
 import { Timeline } from "./Timeline";
 
 const LEAD_IN = 3;
@@ -21,15 +22,18 @@ export function EventIcon({ kind }: { kind: EventKind }) {
 
 export function MatchDetail({
   match,
-  clips,
+  pre,
+  post,
+  initialRange,
   onBack,
-  onClipsChanged,
   notify,
 }: {
   match: MatchSummary;
-  clips: ClipSummary[];
+  pre: number;
+  post: number;
+  /** Start playing this range right away (opened from the highlights page). */
+  initialRange?: [number, number];
   onBack: () => void;
-  onClipsChanged: () => void;
   notify: (message: string, kind?: "error" | "success") => void;
 }) {
   const video = useRef<HTMLVideoElement>(null);
@@ -37,16 +41,25 @@ export function MatchDetail({
   const [duration, setDuration] = useState(match.info.duration ?? 0);
   const [range, setRange] = useState<[number | null, number | null]>([null, null]);
   const [busy, setBusy] = useState(false);
-  const [playing, setPlaying] = useState<ClipSummary | null>(null);
+  /** Range being played; playback pauses at its end. */
+  const playingRange = useRef<[number, number] | null>(initialRange ?? null);
 
   const events = useMemo(() => [...match.info.events].sort((a, b) => a.t - b.t), [match]);
-  const matchClips = clips.filter((c) => c.recording === match.name);
+  const ranges = useMemo(() => highlights(match, pre, post), [match, pre, post]);
 
-  // Smooth playhead while playing.
+  // Smooth playhead while playing; stop at the end of a highlight range.
   useEffect(() => {
     let raf = 0;
     const loop = () => {
-      if (video.current) setCurrent(video.current.currentTime);
+      const v = video.current;
+      if (v) {
+        setCurrent(v.currentTime);
+        const r = playingRange.current;
+        if (r && v.currentTime >= r[1]) {
+          v.pause();
+          playingRange.current = null;
+        }
+      }
       raf = requestAnimationFrame(loop);
     };
     raf = requestAnimationFrame(loop);
@@ -60,12 +73,23 @@ export function MatchDetail({
     if (play) void v.play();
   }, []);
 
+  const playHighlight = useCallback(
+    (h: { start: number; end: number }) => {
+      playingRange.current = [h.start, h.end];
+      seek(h.start);
+    },
+    [seek],
+  );
+
   const jump = useCallback(
     (dir: 1 | -1) => {
       // The event we're "at" is the one whose lead-in we're inside.
       const now = current + LEAD_IN + 0.5 * dir;
       const target = dir > 0 ? events.find((e) => e.t > now) : [...events].reverse().find((e) => e.t < now - 1);
-      if (target) seek(Math.max(0, target.t - LEAD_IN));
+      if (target) {
+        playingRange.current = null;
+        seek(Math.max(0, target.t - LEAD_IN));
+      }
     },
     [current, events, seek],
   );
@@ -73,7 +97,7 @@ export function MatchDetail({
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement).tagName;
-      if (playing || tag === "INPUT") return;
+      if (tag === "INPUT") return;
       const v = video.current;
       if (!v) return;
       // The focused <video> already handles Space itself.
@@ -90,29 +114,15 @@ export function MatchDetail({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [duration, jump, seek, playing]);
+  }, [duration, jump, seek]);
 
-  async function cutRange() {
-    const [s, e] = range;
-    if (s === null || e === null) return;
+  async function exportRange(start: number, end: number) {
     setBusy(true);
     try {
-      await api.cutRange(match.video, s, e);
-      notify(`已剪下 ${clock(s)} – ${clock(e)}`, "success");
+      const path = await api.cutRange(match.video, start, end);
+      notify(`已匯出 ${clock(start)} – ${clock(end)}`, "success");
+      void api.reveal(path);
       setRange([null, null]);
-      onClipsChanged();
-    } catch (err) {
-      notify(String(err), "error");
-    }
-    setBusy(false);
-  }
-
-  async function autoClips() {
-    setBusy(true);
-    try {
-      const n = await api.clipMatch(match.video);
-      notify(n > 0 ? `新增 ${n} 個擊殺片段` : "擊殺片段都已經裁過了", "success");
-      onClipsChanged();
     } catch (err) {
       notify(String(err), "error");
     }
@@ -120,12 +130,13 @@ export function MatchDetail({
   }
 
   const currentEvent = events.findIndex((e) => current >= e.t - LEAD_IN - 0.2 && current <= e.t + 2);
+  const activeHighlight = ranges.findIndex((h) => current >= h.start && current <= h.end);
   const [rin, rout] = range;
 
   return (
     <div className="page">
       <button className="btn ghost back" onClick={onBack}>
-        <IconBack size={16} /> 所有對局
+        <IconBack size={16} /> 返回
       </button>
       <div className="page-head">
         <div>
@@ -145,12 +156,31 @@ export function MatchDetail({
               ref={video}
               src={fileUrl(match.video)}
               controls
-              onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
+              onLoadedMetadata={(e) => {
+                setDuration(e.currentTarget.duration);
+                if (initialRange) seek(initialRange[0]);
+              }}
+              onSeeking={(e) => {
+                // A manual seek outside the range ends "play this highlight".
+                const t = e.currentTarget.currentTime;
+                const r = playingRange.current;
+                if (r && (t < r[0] - 0.5 || t > r[1])) playingRange.current = null;
+              }}
             />
           </div>
 
           <div className="timeline-panel">
-            <Timeline duration={duration} current={current} events={events} range={range} onSeek={(t) => seek(t)} />
+            <Timeline
+              duration={duration}
+              current={current}
+              events={events}
+              range={range}
+              bands={ranges.map((h, i) => ({ start: h.start, end: h.end, active: i === activeHighlight }))}
+              onSeek={(t) => {
+                playingRange.current = null;
+                seek(t);
+              }}
+            />
             <div className="timeline-foot">
               <button className="btn sm" onClick={() => jump(-1)} title="上一個事件 ( , )">
                 <IconPrev size={14} /> 上一個
@@ -174,6 +204,10 @@ export function MatchDetail({
                   <i style={{ background: "var(--assist)" }} />
                   助攻
                 </span>
+                <span>
+                  <i style={{ background: "rgba(255, 201, 64, 0.35)" }} />
+                  精華
+                </span>
               </div>
             </div>
             <div className="timeline-foot" style={{ marginTop: 10 }}>
@@ -188,11 +222,11 @@ export function MatchDetail({
                 設為終點 {rout !== null && <span className="num">{clock(rout)}</span>}
               </button>
               <button
-                className="btn sm primary"
+                className="btn sm"
                 disabled={busy || rin === null || rout === null || rout <= rin}
-                onClick={cutRange}
+                onClick={() => rin !== null && rout !== null && exportRange(rin, rout)}
               >
-                <IconScissors size={14} /> 剪下這段
+                <IconScissors size={14} /> 匯出這段
               </button>
               {rin !== null && (
                 <button className="btn sm ghost" onClick={() => setRange([null, null])}>
@@ -210,32 +244,24 @@ export function MatchDetail({
 
           <div className="page-head" style={{ marginTop: 28, marginBottom: 14 }}>
             <h2 className="page-title" style={{ fontSize: 18 }}>
-              這場的片段
+              精華區間 · {ranges.length}
             </h2>
-            <div className="page-actions">
-              <button className="btn sm" disabled={busy} onClick={autoClips}>
-                {busy ? <span className="spinner" /> : <IconScissors size={14} />} 裁出擊殺片段
-              </button>
-            </div>
           </div>
-          {matchClips.length === 0 ? (
+          {ranges.length === 0 ? (
             <div className="empty" style={{ padding: 28 }}>
-              還沒有片段。按「裁出擊殺片段」,或在時間軸上選一段剪下。
+              這場沒有擊殺,所以沒有精華區間。
             </div>
           ) : (
-            <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))" }}>
-              {matchClips.map((c) => (
-                <div key={c.path} className="card" onClick={() => setPlaying(c)}>
-                  <div className="card-body" style={{ flexDirection: "row", alignItems: "center" }}>
-                    <span className="ev-icon kill">
-                      <IconPlay size={13} />
-                    </span>
-                    <span className="num">{clipAt(c.at)}</span>
-                    <span className={`chip ${c.kills && c.kills >= 2 ? "gold" : ""}`} style={{ marginLeft: "auto" }}>
-                      {c.label}
-                    </span>
-                  </div>
-                </div>
+            <div className="highlight-list">
+              {ranges.map((h, i) => (
+                <HighlightRow
+                  key={i}
+                  h={h}
+                  active={i === activeHighlight}
+                  busy={busy}
+                  onPlay={() => playHighlight(h)}
+                  onExport={() => exportRange(h.start, h.end)}
+                />
               ))}
             </div>
           )}
@@ -269,7 +295,10 @@ export function MatchDetail({
               <button
                 key={i}
                 className={`event-item ${i === currentEvent ? "current" : ""}`}
-                onClick={() => seek(Math.max(0, e.t - LEAD_IN))}
+                onClick={() => {
+                  playingRange.current = null;
+                  seek(Math.max(0, e.t - LEAD_IN));
+                }}
               >
                 <EventIcon kind={e.kind} />
                 {kindLabel[e.kind]}
@@ -279,14 +308,45 @@ export function MatchDetail({
           </div>
         </div>
       </div>
+    </div>
+  );
+}
 
-      {playing && (
-        <ClipModal
-          path={playing.path}
-          title={`${match.info.map} · ${clipAt(playing.at)} · ${playing.label}`}
-          onClose={() => setPlaying(null)}
-        />
-      )}
+function HighlightRow({
+  h,
+  active,
+  busy,
+  onPlay,
+  onExport,
+}: {
+  h: Highlight;
+  active: boolean;
+  busy: boolean;
+  onPlay: () => void;
+  onExport: () => void;
+}) {
+  return (
+    <div className={`highlight-row ${active ? "active" : ""}`} onClick={onPlay}>
+      <span className="ev-icon kill">
+        <IconPlay size={13} />
+      </span>
+      <span className="num">
+        {clock(h.start)} – {clock(h.end)}
+      </span>
+      <span className={`chip ${h.kills >= 2 ? "gold" : "kill"}`}>{killLabel(h.kills)}</span>
+      <span className="card-meta num">{Math.round(h.end - h.start)} 秒</span>
+      <button
+        className="btn sm ghost"
+        style={{ marginLeft: "auto" }}
+        disabled={busy}
+        title="把這段存成獨立的影片檔"
+        onClick={(e) => {
+          e.stopPropagation();
+          onExport();
+        }}
+      >
+        <IconFolder size={14} /> 匯出
+      </button>
     </div>
   );
 }

@@ -4,7 +4,7 @@
 
 - **自動錄影**：對局開始時自動開錄，結束後自動停止
 - **事件偵測**：從 killfeed 畫面判斷你的擊殺、死亡和助攻，標記在整場時間軸上
-- **自動剪片段**：對局結束後裁出每次擊殺的片段，相近的擊殺會合併成多殺片段
+- **精華區間**：每次擊殺自動標成一個精華區間，相近的擊殺合併成多殺；直接從整場錄影播放，不另外產生檔案，想要的話可以匯出成獨立影片
 - **內建播放器**：在 app 裡看整場錄影，點時間軸上的標記直接跳到那一刻，也能自己選一段剪下來
 
 ## 運作方式
@@ -15,14 +15,14 @@
 | 聲音 | WASAPI 擷取，每個聲音封包依它的系統時間戳記放到正確位置（跟畫面擷取用同一個時鐘），對局結束後跟畫面對齊、合成 MP4，誤差約 ±10ms |
 | 對局開始／結束 | 讀 Valorant 自己寫的記錄檔 `%LOCALAPPDATA%\VALORANT\Saved\Logs\ShooterGame.log`，地圖和模式也從這裡取得 |
 | 擊殺／死亡／助攻 | 看 killfeed 畫面：Valorant 會在你自己的頭像外框一圈黃線。黃框在左邊是你擊殺，在右邊是你死亡；隊友擊殺那一行最左邊的助攻小頭像有黃框，就是你的助攻 |
-| 裁切片段 | ffmpeg 直接複製串流，不重新編碼，所以很快、畫質無損 |
+| 精華與預覽 | 精華區間由擊殺時間即時計算；預覽直接用影片本身的畫面，不產生縮圖檔。匯出片段時 ffmpeg 直接複製串流，不重新編碼，很快且畫質無損 |
 
 整個過程不讀寫遊戲記憶體、不注入程式，也不呼叫 Riot API。原理跟 OBS、Discord 的螢幕錄影一樣。
 
 ## 需求
 
 - Windows 10 2004 以上或 Windows 11（「只錄遊戲聲音」需要這個版本以上）
-- 含 gfxcapture 濾鏡的新版 ffmpeg（winget 上的 Gyan 版本就有），錄影、裁切片段和產生縮圖都要用到：
+- 含 gfxcapture 濾鏡的新版 ffmpeg（winget 上的 Gyan 版本就有），錄影和匯出片段都要用到：
 
   ```
   winget install Gyan.FFmpeg
@@ -74,8 +74,7 @@ npx tauri dev
 | 畫面更新率 | 30／60 FPS | 60 |
 | 畫質 | 6～60 Mbps | 20 Mbps |
 | 錄影位置 | 任意資料夾 | `影片\OwnClips` |
-| 自動裁出擊殺片段 | 開／關 | 開 |
-| 擊殺前／後保留 | 2～20 秒／1～10 秒 | 8 秒／3 秒 |
+| 精華區間：擊殺前／後保留 | 2～20 秒／1～10 秒 | 8 秒／3 秒 |
 
 設定存在 `%APPDATA%\OwnClips\config.json`，在 app 裡修改會自動儲存。
 
@@ -87,9 +86,7 @@ npx tauri dev
 2026-10-21 19-29-38.mp4            整場錄影
 2026-10-21 19-29-38.events.json    這場的地圖、模式和每個事件的時間點
 clips\
-  2026-10-21 19-29-38 03m27s 4殺.mp4   自動裁出的擊殺片段（從對局第 3:27 開始，4 殺）
-  2026-10-21 19-29-38 05m10s 精選.mp4  在時間軸上自己剪的片段
-.thumbs\                           縮圖快取
+  2026-10-21 19-29-38 05m10s 精選.mp4  手動匯出的片段（從對局第 5:10 開始）
 ```
 
 ## 命令列工具
@@ -100,7 +97,7 @@ clips\
 cargo build --release -p ownclips
 
 target\release\ownclips.exe detect                  自動錄影（等於 app 的背景功能）
-target\release\ownclips.exe clip                    幫所有錄影補裁擊殺片段
+target\release\ownclips.exe clip                    把所有錄影的擊殺片段批次裁成檔案（app 不會自動做）
 target\release\ownclips.exe record 10 VALORANT game 錄任意視窗 10 秒，測試錄影器
 ```
 
@@ -115,7 +112,7 @@ src/                 核心函式庫（app 和命令列共用）
   gamestate.rs       讀遊戲記錄檔，判斷對局開始／結束
   killfeed.rs        從 killfeed 畫面判斷擊殺／死亡
   session.rs         自動錄影流程，產生 .events.json
-  clip.rs            用 ffmpeg 裁切片段、擷取縮圖
+  clip.rs            用 ffmpeg 匯出片段
   capture.rs         視窗擷取
   config.rs          設定
   main.rs            命令列工具

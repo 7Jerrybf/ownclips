@@ -13,7 +13,13 @@ const AUDIO: { mode: AudioMode; title: string; desc: string }[] = [
   { mode: "off", title: "不錄聲音", desc: "只錄畫面" },
 ];
 
-export function SettingsView({ notify }: { notify: (message: string, kind?: "error" | "success") => void }) {
+export function SettingsView({
+  notify,
+  onSaved,
+}: {
+  notify: (message: string, kind?: "error" | "success") => void;
+  onSaved: () => void;
+}) {
   const [cfg, setCfg] = useState<Config | null>(null);
   const [dir, setDir] = useState("");
   const [ffmpeg, setFfmpeg] = useState<boolean | null>(null);
@@ -42,13 +48,14 @@ export function SettingsView({ notify }: { notify: (message: string, kind?: "err
       api
         .saveConfig(cfg)
         .then(() => {
+          onSaved();
           setSaved(true);
           setTimeout(() => setSaved(false), 1500);
         })
         .catch((e) => notify(String(e), "error"));
     }, 350);
     return () => clearTimeout(t);
-  }, [cfg, notify]);
+  }, [cfg, notify, onSaved]);
 
   if (!cfg) return <div className="page" />;
   const set = <K extends keyof Config>(k: K, v: Config[K]) => setCfg({ ...cfg, [k]: v });
@@ -128,7 +135,7 @@ export function SettingsView({ notify }: { notify: (message: string, kind?: "err
           <div className="field">
             <div className="field-label">
               <b>錄影位置</b>
-              <span>整場錄影存在這裡,片段在底下的 clips 資料夾</span>
+              <span>整場錄影存在這裡;手動匯出的片段在底下的 clips 資料夾</span>
             </div>
             <div className="field-control">
               <span className="path-box" title={dir}>
@@ -144,19 +151,12 @@ export function SettingsView({ notify }: { notify: (message: string, kind?: "err
           </div>
         </div>
 
-        <div className="section-title">片段</div>
+        <div className="section-title">精華區間</div>
         <div className="section">
           <div className="field">
             <div className="field-label">
-              <b>對局結束後自動裁出擊殺片段</b>
-              <span>相近的擊殺會合併成一支多殺片段</span>
-            </div>
-            <div className={`switch ${cfg.auto_clip ? "on" : ""}`} onClick={() => set("auto_clip", !cfg.auto_clip)} />
-          </div>
-          <div className="field">
-            <div className="field-label">
               <b>擊殺前保留</b>
-              <span>片段從第一次擊殺前幾秒開始</span>
+              <span>精華區間從第一次擊殺前幾秒開始;相近的擊殺會合併成多殺</span>
             </div>
             <div className="range-wrap">
               <input
@@ -191,7 +191,7 @@ export function SettingsView({ notify }: { notify: (message: string, kind?: "err
             <div className="field">
               <div className="field-label">
                 <b className="warn">找不到 ffmpeg</b>
-                <span>裁切片段和縮圖需要 ffmpeg。請在終端機執行 winget install Gyan.FFmpeg 後重新開啟 OwnClips。</span>
+                <span>錄影需要 ffmpeg。請在終端機執行 winget install Gyan.FFmpeg 後重新開啟 OwnClips。</span>
               </div>
             </div>
           )}

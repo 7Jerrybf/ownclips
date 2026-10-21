@@ -1,5 +1,6 @@
-// Full-match timeline: kill markers above the track, deaths below, the
-// playhead, and an optional highlighted in/out range. Click to seek.
+// Full-match timeline: kill markers above the track, deaths below,
+// highlight ranges as bands on the track, the playhead, and an optional
+// in/out selection. Click to seek.
 import { useRef, useState } from "react";
 import type { MatchEvent } from "../api";
 import { clock, kindLabel } from "../format";
@@ -9,12 +10,14 @@ export function Timeline({
   current,
   events,
   range,
+  bands,
   onSeek,
 }: {
   duration: number;
   current: number;
   events: MatchEvent[];
   range: [number | null, number | null];
+  bands: { start: number; end: number; active: boolean }[];
   onSeek: (t: number) => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -40,6 +43,13 @@ export function Timeline({
     >
       <div className="track">
         <div className="played" style={{ width: pct(current) }} />
+        {bands.map((b, i) => (
+          <div
+            key={i}
+            className={`band ${b.active ? "active" : ""}`}
+            style={{ left: pct(b.start), width: `calc(${pct(b.end)} - ${pct(b.start)})` }}
+          />
+        ))}
         {rin !== null && (
           <div
             className="range"

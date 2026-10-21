@@ -3,7 +3,7 @@ import type { MatchSummary } from "../api";
 import { api } from "../api";
 import { clock, count, shortDate, size } from "../format";
 import { IconFolder, IconMatches, IconRefresh, IconTrash } from "./Icons";
-import { Thumb } from "./Thumb";
+import { VideoThumb } from "./VideoThumb";
 
 export function MatchesView({
   matches,
@@ -17,6 +17,7 @@ export function MatchesView({
   notify: (message: string, kind?: "error" | "success") => void;
 }) {
   const [confirm, setConfirm] = useState<string | null>(null);
+  const [hovered, setHovered] = useState<string | null>(null);
   const totalKills = matches.reduce((n, m) => n + count(m.info.events, "kill"), 0);
 
   async function remove(m: MatchSummary) {
@@ -63,9 +64,21 @@ export function MatchesView({
             const assists = count(m.info.events, "assist");
             const dur = m.info.duration ?? 0;
             return (
-              <div key={m.video} className="card" onClick={() => !m.recording && onOpen(m)}>
+              <div
+                key={m.video}
+                className="card"
+                onClick={() => !m.recording && onOpen(m)}
+                onMouseEnter={() => setHovered(m.video)}
+                onMouseLeave={() => setHovered(null)}
+              >
                 <div className="thumb">
-                  <Thumb path={m.video} at={thumbTime(m)} disabled={m.recording} />
+                  <VideoThumb
+                    path={m.video}
+                    at={thumbTime(m)}
+                    end={thumbTime(m) + 6}
+                    hovered={hovered === m.video}
+                    disabled={m.recording}
+                  />
                   <div className="shade" />
                   <div className="badge-tl">
                     {m.recording && <span className="chip rec">● 錄影 / 處理中</span>}

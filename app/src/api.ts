@@ -25,17 +25,6 @@ export interface MatchSummary {
   recording: boolean;
 }
 
-export interface ClipSummary {
-  path: string;
-  name: string;
-  recording: string;
-  at: string;
-  label: string;
-  kills: number | null;
-  size: number;
-  modified: number;
-}
-
 export interface RegionPct {
   x: number;
   y: number;
@@ -48,7 +37,6 @@ export interface Config {
   recordings_dir: string | null;
   clip_pre_seconds: number;
   clip_post_seconds: number;
-  auto_clip: boolean;
   audio_mode: AudioMode;
   video_fps: number;
   video_bitrate_mbps: number;
@@ -85,14 +73,10 @@ export const api = {
   ffmpegAvailable: () => invoke<boolean>("ffmpeg_available"),
   encoderName: () => invoke<string | null>("encoder_name"),
   listMatches: () => invoke<MatchSummary[]>("list_matches"),
-  listClips: () => invoke<ClipSummary[]>("list_clips"),
-  thumbnail: (path: string, at: number) => invoke<string>("thumbnail", { path, at }),
   deleteMatch: (video: string) => invoke<void>("delete_match", { video }),
-  deleteClip: (path: string) => invoke<void>("delete_clip", { path }),
   reveal: (path: string) => invoke<void>("reveal", { path }),
   openPath: (path: string) => invoke<void>("open_path", { path }),
   cutRange: (video: string, start: number, end: number) => invoke<string>("cut_range", { video, start, end }),
-  clipMatch: (video: string) => invoke<number>("clip_match", { video }),
   grabGameFrame: () => invoke<GameFrame>("grab_game_frame"),
   saveRegion: (region: RegionPct) => invoke<void>("save_region", { region }),
 };

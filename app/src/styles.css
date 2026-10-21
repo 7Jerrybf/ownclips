@@ -520,6 +520,15 @@ button {
   bottom: 0;
   background: rgba(255, 255, 255, 0.14);
 }
+.timeline .band {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: rgba(255, 201, 64, 0.22);
+}
+.timeline .band.active {
+  background: rgba(255, 201, 64, 0.5);
+}
 .timeline .range {
   position: absolute;
   top: 0;
@@ -702,6 +711,32 @@ button {
   font-size: 11px;
   color: var(--muted);
   margin: 0 2px;
+}
+
+/* ---------- highlights ---------- */
+
+.highlight-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.highlight-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 10px 8px 12px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.highlight-row:hover {
+  background: var(--panel-2);
+}
+.highlight-row.active {
+  border-color: rgba(255, 201, 64, 0.6);
+  background: rgba(255, 201, 64, 0.08);
 }
 
 /* ---------- settings ---------- */

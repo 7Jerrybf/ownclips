@@ -116,10 +116,10 @@ fn apply_notice(app: &AppHandle, status: &Mutex<RecorderStatus>, notice: Notice)
                 let name = video.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 Some(Toast { kind: "success".into(), message: format!("已救回上次未完成的錄影 {name}") })
             }
-            Notice::Stopped { clips, .. } => {
+            Notice::Stopped { .. } => {
                 *s = RecorderStatus { state: "waiting".into(), ..Default::default() };
                 let _ = app.emit("library-changed", ());
-                Some(Toast { kind: "stop".into(), message: format!("對局結束,錄影已存檔,自動裁出 {clips} 個片段") })
+                Some(Toast { kind: "stop".into(), message: "錄影已存檔,精華區間已標好".into() })
             }
             Notice::Skipped { reason } => Some(Toast { kind: "info".into(), message: reason }),
             Notice::Error(e) => {
@@ -179,21 +179,6 @@ struct MatchSummary {
     recording: bool,
 }
 
-#[derive(Serialize)]
-struct ClipSummary {
-    path: String,
-    name: String,
-    /// Recording the clip came from (its file stem).
-    recording: String,
-    /// Position in the recording, e.g. "03m27s".
-    at: String,
-    /// "3殺", "精選"...
-    label: String,
-    kills: Option<u32>,
-    size: u64,
-    modified: i64,
-}
-
 fn dir_files(dir: &Path) -> Vec<PathBuf> {
     fs::read_dir(dir)
         .map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.is_file()).collect())
@@ -226,41 +211,6 @@ fn list_matches(bg: State<Background>) -> CmdResult<Vec<MatchSummary>> {
     Ok(out)
 }
 
-#[tauri::command]
-fn list_clips() -> CmdResult<Vec<ClipSummary>> {
-    let dir = config::load().map_err(err)?.recordings_dir().map_err(err)?.join("clips");
-    let mut out: Vec<ClipSummary> = dir_files(&dir)
-        .into_iter()
-        .filter(|p| clip::is_video(p))
-        .filter_map(|p| {
-            let stem = p.file_stem()?.to_str()?.to_string();
-            // Names come from clip.rs: "<recording> <MM>m<SS>s <label>".
-            let mut parts = stem.rsplitn(3, ' ');
-            let label = parts.next().unwrap_or_default().to_string();
-            let at = parts.next().unwrap_or_default().to_string();
-            let recording = parts.next().unwrap_or(&stem).to_string();
-            let meta = fs::metadata(&p).ok()?;
-            Some(ClipSummary {
-                kills: label.strip_suffix('殺').and_then(|k| k.parse().ok()),
-                name: p.file_name()?.to_string_lossy().into_owned(),
-                path: p.to_string_lossy().into_owned(),
-                size: meta.len(),
-                modified: meta
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_millis() as i64)
-                    .unwrap_or(0),
-                recording,
-                at,
-                label,
-            })
-        })
-        .collect();
-    out.sort_by(|a, b| b.name.cmp(&a.name));
-    Ok(out)
-}
-
 fn is_mkv(p: &Path) -> bool {
     p.extension().is_some_and(|e| e.eq_ignore_ascii_case("mkv"))
 }
@@ -274,46 +224,15 @@ async fn encoder_name() -> Option<String> {
         .flatten()
 }
 
-fn thumb_path(video: &Path) -> PathBuf {
-    let name = video.file_name().unwrap_or_default().to_string_lossy();
-    video.parent().unwrap_or(Path::new(".")).join(".thumbs").join(format!("{name}.jpg"))
-}
-
-/// A cached JPEG of `path` at `at` seconds (negative: from the end).
-#[tauri::command]
-async fn thumbnail(path: String, at: f64) -> CmdResult<String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let video = PathBuf::from(&path);
-        let thumb = thumb_path(&video);
-        if !thumb.exists() {
-            fs::create_dir_all(thumb.parent().unwrap()).map_err(err)?;
-            clip::grab_frame(&video, at, 640, &thumb).map_err(err)?;
-        }
-        Ok(thumb.to_string_lossy().into_owned())
-    })
-    .await
-    .map_err(err)?
-}
-
 #[tauri::command]
 fn delete_match(video: String) -> CmdResult<()> {
     let video = PathBuf::from(video);
-    for p in [MatchInfo::path_for(&video), thumb_path(&video)] {
+    for p in [MatchInfo::path_for(&video)] {
         if p.exists() {
             trash::delete(&p).map_err(err)?;
         }
     }
     trash::delete(&video).map_err(err)
-}
-
-#[tauri::command]
-fn delete_clip(path: String) -> CmdResult<()> {
-    let path = PathBuf::from(path);
-    let thumb = thumb_path(&path);
-    if thumb.exists() {
-        let _ = fs::remove_file(thumb);
-    }
-    trash::delete(&path).map_err(err)
 }
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -339,16 +258,6 @@ async fn cut_range(video: String, start: f64, end: f64) -> CmdResult<String> {
         clip::cut_range(Path::new(&video), start, end, "精選")
             .map(|p| p.to_string_lossy().into_owned())
             .map_err(|e| format!("{e:#}"))
-    })
-    .await
-    .map_err(err)?
-}
-
-#[tauri::command]
-async fn clip_match(video: String) -> CmdResult<usize> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let cfg = config::load().map_err(err)?;
-        clip::clip_match(Path::new(&video), &cfg).map_err(|e| format!("{e:#}"))
     })
     .await
     .map_err(err)?
@@ -421,14 +330,10 @@ fn main() {
             ffmpeg_available,
             encoder_name,
             list_matches,
-            list_clips,
-            thumbnail,
             delete_match,
-            delete_clip,
             reveal,
             open_path,
             cut_range,
-            clip_match,
             grab_game_frame,
             save_region,
         ])
