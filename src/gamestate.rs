@@ -7,10 +7,12 @@
 //   LogGameFlowStateManager: ... Broadcasting state changed to InGame
 //   LogShooterGameState: Match Ended: Completion State: 'Completed' ...
 //   LogGameFlowStateManager: ... Broadcasting state changed to TransitionToMainMenu
-// The log is recreated each time the game starts.
+// The log is recreated each time the game starts. When the previous log
+// can't be rotated away the game writes ShooterGame_2.log (etc.) instead,
+// so the watcher follows whichever ShooterGame*.log has the newest entry.
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
@@ -24,7 +26,9 @@ pub enum GameEvent {
 }
 
 pub struct LogWatcher {
-    path: PathBuf,
+    dir: PathBuf,
+    /// The log currently being followed.
+    path: Option<PathBuf>,
     pos: u64,
     partial: String,
     map: String,
@@ -37,9 +41,10 @@ pub struct LogWatcher {
 impl LogWatcher {
     pub fn new() -> Result<Self> {
         let local = std::env::var("LOCALAPPDATA").context("找不到 LOCALAPPDATA 環境變數")?;
-        let path = PathBuf::from(local).join(r"VALORANT\Saved\Logs\ShooterGame.log");
+        let dir = PathBuf::from(local).join(r"VALORANT\Saved\Logs");
         let mut w = Self {
-            path,
+            dir,
+            path: None,
             pos: 0,
             partial: String::new(),
             map: String::new(),
@@ -48,8 +53,11 @@ impl LogWatcher {
             pending_start: false,
         };
         // Catch up on the existing log silently, so starting the app in the
-        // middle of a match still records the rest of it.
+        // middle of a match still records the rest of it. A log that went
+        // quiet while "in game" is from a game that crashed or was closed.
         let _ = w.read_new_lines();
+        let live = w.path.as_deref().is_some_and(|p| written_recently(p, chrono::Duration::minutes(5)));
+        w.in_game &= live;
         w.pending_start = w.in_game;
         Ok(w)
     }
@@ -69,10 +77,25 @@ impl LogWatcher {
     }
 
     fn read_new_lines(&mut self) -> Result<Vec<GameEvent>> {
-        let mut file = File::open(&self.path)?;
+        let mut events = Vec::new();
+        let current = newest_log(&self.dir).context("找不到 Valorant 記錄檔")?;
+        if self.path.as_ref() != Some(&current) {
+            // The game restarted into a different log file.
+            if self.path.is_some() && self.in_game {
+                events.push(GameEvent::LeftMatch);
+            }
+            self.path = Some(current.clone());
+            self.pos = 0;
+            self.partial.clear();
+            self.in_game = false;
+        }
+        let mut file = File::open(&current)?;
         let len = file.metadata()?.len();
         if len < self.pos {
             // The game restarted and began a new log.
+            if self.in_game {
+                events.push(GameEvent::LeftMatch);
+            }
             self.pos = 0;
             self.partial.clear();
             self.in_game = false;
@@ -83,7 +106,6 @@ impl LogWatcher {
         self.pos += bytes.len() as u64;
         self.partial.push_str(&String::from_utf8_lossy(&bytes));
 
-        let mut events = Vec::new();
         let Some(last_newline) = self.partial.rfind('\n') else {
             return Ok(events);
         };
@@ -123,6 +145,47 @@ impl LogWatcher {
         }
         None
     }
+}
+
+/// The ShooterGame*.log (not a backup) whose last line is the most recent.
+/// File modification times can't be used: they lag while the game keeps
+/// the file open.
+fn newest_log(dir: &Path) -> Option<PathBuf> {
+    std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            name.starts_with("ShooterGame") && name.ends_with(".log") && !name.contains("backup")
+        })
+        .filter_map(|p| Some((last_timestamp(&p)?, p)))
+        .max_by(|a, b| a.0.cmp(&b.0))
+        .map(|(_, p)| p)
+}
+
+/// The "[2026.10.21-13.46.33:170]" stamp starting the file's last
+/// timestamped line; these sort correctly as strings. (Only line starts
+/// count: text like "Response Code: [200]" appears inside lines.)
+fn last_timestamp(path: &Path) -> Option<String> {
+    let mut file = File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    file.seek(SeekFrom::Start(len.saturating_sub(64 * 1024))).ok()?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).ok()?;
+    let text = String::from_utf8_lossy(&bytes);
+    text.lines().rev().find_map(|line| {
+        let stamp = line.get(..25)?;
+        let b = stamp.as_bytes();
+        (b[0] == b'[' && b[24] == b']' && b[11] == b'-' && b[1..5].iter().all(u8::is_ascii_digit))
+            .then(|| stamp.to_string())
+    })
+}
+
+/// Whether a log's last line was written within `max_age` (log times are UTC).
+fn written_recently(path: &Path, max_age: chrono::Duration) -> bool {
+    last_timestamp(path)
+        .and_then(|s| chrono::NaiveDateTime::parse_from_str(&s[1..20], "%Y.%m.%d-%H.%M.%S").ok())
+        .is_some_and(|t| chrono::Utc::now().naive_utc() - t < max_age)
 }
 
 fn between<'a>(s: &'a str, start: &str, end: &str) -> Option<&'a str> {

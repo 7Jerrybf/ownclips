@@ -27,6 +27,8 @@ const END_TAIL: Duration = Duration::from_secs(6);
 /// Min gap between saved "maybe an assist" frames.
 const ASSIST_SAMPLE_GAP: Duration = Duration::from_secs(2);
 const STRAY_YELLOW_MIN: usize = 40;
+/// Shorter recordings without any event are discarded as false starts.
+const MIN_MATCH_SECONDS: f64 = 20.0;
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -182,6 +184,13 @@ impl AutoRecorder {
         let mut notices = Vec::new();
         if let Err(e) = m.recorder.stop() {
             notices.push(Notice::Error(format!("{e:#}")));
+            return notices;
+        }
+        // A few seconds with nothing in it is a false start, not a match.
+        if m.info.duration.is_none_or(|d| d < MIN_MATCH_SECONDS) && m.info.events.is_empty() {
+            let _ = fs::remove_file(&m.video);
+            let _ = fs::remove_file(MatchInfo::path_for(&m.video));
+            notices.push(Notice::Skipped { reason: "錄影太短,已捨棄".to_string() });
             return notices;
         }
         let _ = m.info.save(&m.video);
