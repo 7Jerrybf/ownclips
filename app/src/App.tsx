@@ -1,0 +1,152 @@
+import { listen } from "@tauri-apps/api/event";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { ClipSummary, MatchSummary, RecorderStatus, Toast } from "./api";
+import { api } from "./api";
+import { ClipsView } from "./components/ClipsView";
+import { IconClips, IconMatches, IconPlay, IconSettings } from "./components/Icons";
+import { MatchDetail } from "./components/MatchDetail";
+import { MatchesView } from "./components/MatchesView";
+import { SettingsView } from "./components/SettingsView";
+import { Toasts, type ToastItem } from "./components/Toasts";
+import { clock } from "./format";
+
+type Page = "matches" | "clips" | "settings";
+
+export default function App() {
+  const [page, setPage] = useState<Page>("matches");
+  const [matches, setMatches] = useState<MatchSummary[]>([]);
+  const [clips, setClips] = useState<ClipSummary[]>([]);
+  const [open, setOpen] = useState<MatchSummary | null>(null);
+  const [status, setStatus] = useState<RecorderStatus | null>(null);
+  const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const [calibrated, setCalibrated] = useState(true);
+  const nextId = useRef(1);
+
+  const notify = useCallback((message: string, kind: Toast["kind"] = "info") => {
+    const id = nextId.current++;
+    setToasts((t) => [...t, { id, kind, message }]);
+    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 4500);
+  }, []);
+
+  const refresh = useCallback(() => {
+    api.listMatches().then(setMatches).catch((e) => notify(String(e), "error"));
+    api.listClips().then(setClips).catch(() => {});
+    api.getConfig().then((c) => setCalibrated(!!c.killfeed_region));
+  }, [notify]);
+
+  useEffect(() => {
+    refresh();
+    api.status().then(setStatus);
+    const unlisten = [
+      listen<RecorderStatus>("recorder-status", (e) => {
+        setStatus(e.payload);
+        if (e.payload.state === "recording") refresh();
+      }),
+      listen<Toast>("toast", (e) => notify(e.payload.message, e.payload.kind)),
+      listen("library-changed", () => refresh()),
+    ];
+    return () => unlisten.forEach((p) => p.then((f) => f()));
+  }, [refresh, notify]);
+
+  // Keep the open match in sync after a refresh (e.g. new clips).
+  useEffect(() => {
+    if (open) setOpen(matches.find((m) => m.video === open.video) ?? null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [matches]);
+
+  const go = (p: Page) => {
+    setPage(p);
+    setOpen(null);
+  };
+
+  return (
+    <div className="shell">
+      <aside className="sidebar">
+        <div className="brand">
+          <div className="brand-mark">
+            <IconPlay size={14} />
+          </div>
+          OwnClips
+        </div>
+        <button className={`nav-item ${page === "matches" ? "active" : ""}`} onClick={() => go("matches")}>
+          <IconMatches /> 對局 <span className="count num">{matches.length}</span>
+        </button>
+        <button className={`nav-item ${page === "clips" ? "active" : ""}`} onClick={() => go("clips")}>
+          <IconClips /> 片段 <span className="count num">{clips.length}</span>
+        </button>
+        <button className={`nav-item ${page === "settings" ? "active" : ""}`} onClick={() => go("settings")}>
+          <IconSettings /> 設定
+        </button>
+        <div className="sidebar-spacer" />
+        <StatusCard status={status} calibrated={calibrated} onFix={() => go("settings")} />
+      </aside>
+
+      <main className="main">
+        {page === "matches" &&
+          (open ? (
+            <MatchDetail
+              match={open}
+              clips={clips}
+              onBack={() => setOpen(null)}
+              onClipsChanged={refresh}
+              notify={notify}
+            />
+          ) : (
+            <MatchesView matches={matches} onOpen={setOpen} onChanged={refresh} notify={notify} />
+          ))}
+        {page === "clips" && <ClipsView clips={clips} matches={matches} onChanged={refresh} notify={notify} />}
+        {page === "settings" && <SettingsView notify={notify} />}
+      </main>
+      <Toasts items={toasts} />
+    </div>
+  );
+}
+
+function StatusCard({
+  status,
+  calibrated,
+  onFix,
+}: {
+  status: RecorderStatus | null;
+  calibrated: boolean;
+  onFix: () => void;
+}) {
+  const [, tick] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => tick((n) => n + 1), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  if (status?.state === "recording") {
+    const elapsed = status.started_at ? (Date.now() - status.started_at) / 1000 : 0;
+    return (
+      <div className="status-card recording">
+        <div className="status-head">
+          <span className="dot live" /> 錄影中 <span className="num" style={{ marginLeft: "auto" }}>{clock(elapsed)}</span>
+        </div>
+        <div className="status-sub">
+          {status.mode} · {status.map}
+        </div>
+        <div className="status-kd num">
+          <span style={{ color: "var(--kill)" }}>{status.kills} 擊殺</span>
+          <span style={{ color: "var(--death)" }}>{status.deaths} 死亡</span>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="status-card">
+      <div className="status-head">
+        <span className={`dot ${calibrated ? "ok" : ""}`} /> {calibrated ? "待命中" : "需要設定"}
+      </div>
+      <div className="status-sub">
+        {calibrated ? "對局開始時會自動錄影" : "還沒校準 killfeed,錄影時不會偵測擊殺"}
+      </div>
+      {!calibrated && (
+        <button className="btn sm" onClick={onFix}>
+          前往校準
+        </button>
+      )}
+    </div>
+  );
+}

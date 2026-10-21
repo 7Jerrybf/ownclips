@@ -1,0 +1,2 @@
+# Big5-encoded CRLF batch files: keep bytes exactly as-is
+*.bat -text
