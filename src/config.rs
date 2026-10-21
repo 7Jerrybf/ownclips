@@ -34,10 +34,14 @@ pub struct Config {
     pub video_bitrate_mbps: u32,
 }
 
+/// Where the killfeed sits with Valorant's default HUD on a 16:9 screen
+/// (measured at 2560x1440), so detection works before any calibration.
+pub const DEFAULT_KILLFEED_REGION: RegionPct = RegionPct { x: 0.761, y: 0.0728, w: 0.2282, h: 0.2669 };
+
 impl Default for Config {
     fn default() -> Self {
         Self {
-            killfeed_region: None,
+            killfeed_region: Some(DEFAULT_KILLFEED_REGION),
             recordings_dir: None,
             clip_pre_seconds: 8.0,
             clip_post_seconds: 3.0,

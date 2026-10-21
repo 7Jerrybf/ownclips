@@ -316,8 +316,21 @@ fn save_region(region: RegionPct) -> CmdResult<()> {
 
 fn main() {
     let app = tauri::Builder::default()
+        // Two copies would both record every match: a second launch just
+        // brings the running window forward.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.unminimize();
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            // The installer ships ffmpeg next to the app.
+            if let Ok(dir) = app.path().resource_dir() {
+                ownclips::clip::set_bundled_ffmpeg(dir.join("ffmpeg").join("ffmpeg.exe"));
+            }
             let bg = start_background(app.handle().clone());
             app.manage(bg);
             Ok(())

@@ -159,11 +159,22 @@ pub(crate) fn ffmpeg() -> Result<Command> {
     Ok(cmd)
 }
 
-/// Finds ffmpeg on PATH, or where winget installs it (PATH changes only
-/// reach programs started after the install).
+static BUNDLED: OnceLock<PathBuf> = OnceLock::new();
+
+/// Uses the ffmpeg shipped with the app (call before anything runs ffmpeg).
+pub fn set_bundled_ffmpeg(path: PathBuf) {
+    let _ = BUNDLED.set(path);
+}
+
+/// The app's bundled ffmpeg if present, else ffmpeg on PATH, or where
+/// winget installs it (PATH changes only reach programs started after the
+/// install).
 fn ffmpeg_exe() -> Option<PathBuf> {
     static EXE: OnceLock<Option<PathBuf>> = OnceLock::new();
     EXE.get_or_init(|| {
+        if let Some(p) = BUNDLED.get().filter(|p| p.is_file()) {
+            return Some(p.clone());
+        }
         let on_path = std::env::var_os("PATH")
             .into_iter()
             .flat_map(|p| std::env::split_paths(&p).collect::<Vec<_>>())

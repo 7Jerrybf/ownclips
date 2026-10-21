@@ -19,16 +19,23 @@
 
 整個過程不讀寫遊戲記憶體、不注入程式，也不呼叫 Riot API。原理跟 OBS、Discord 的螢幕錄影一樣。
 
-## 需求
+## 安裝
 
-- Windows 10 2004 以上或 Windows 11（「只錄遊戲聲音」需要這個版本以上）
-- 含 gfxcapture 濾鏡的新版 ffmpeg（winget 上的 Gyan 版本就有），錄影和匯出片段都要用到：
+執行 `OwnClips_<版本>_x64-setup.exe` 就好，不需要系統管理員權限，也不用另外裝任何東西：
+
+- ffmpeg 已經包在安裝檔裡
+- 沒有 WebView2 的電腦會自動安裝
+- 內建 16:9 螢幕、預設 HUD 的 killfeed 位置，裝好就能偵測；畫面比例或 HUD 不同的話，到「設定 → 偵測」重新框選
+
+需要 Windows 10 2004 以上或 Windows 11（「只錄遊戲聲音」需要這個版本以上）。安裝檔沒有數位簽章，Windows 會跳出 SmartScreen 警告，按「其他資訊 → 仍要執行」即可。同時只能開一個 OwnClips，再開一次只會把原本的視窗叫到前面。
+
+## 開發需求
+
+- 含 gfxcapture 濾鏡的新版 ffmpeg（winget 上的 Gyan 版本就有），開發時錄影和匯出片段都要用到；打包時也會從這裡複製進安裝檔：
 
   ```
   winget install Gyan.FFmpeg
   ```
-
-開發還需要：
 
 - [Rust](https://rustup.rs)
 - Node.js 18 以上
@@ -43,12 +50,14 @@ npx tauri build --no-bundle
 
 編譯好的程式在 `target\release\ownclips-app.exe`，也可以直接雙擊根目錄的 `OwnClips.bat`。
 
-打包成安裝檔（產生 `target\release\bundle\nsis\OwnClips_<版本>_x64-setup.exe`）：
+打包成安裝檔（產生 `target\release\bundle\nsis\OwnClips_<版本>_x64-setup.exe`，約 63 MB）：
 
 ```
 cd app
 npx tauri build
 ```
+
+打包前會自動執行 `app/scripts/fetch-ffmpeg.ps1`，把 winget 裝的 ffmpeg 複製到 `app/src-tauri/resources/ffmpeg/`（檔案太大，不放進 git）；電腦上沒有的話會先用 winget 安裝。ffmpeg 是 GPL 授權，授權檔會一起放進安裝檔；公開散布安裝檔時，也要提供 ffmpeg 原始碼的取得方式（例如連到 https://www.gyan.dev/ffmpeg/builds/ ）。
 
 開發模式（前端改了會即時更新）：
 
@@ -59,12 +68,9 @@ npx tauri dev
 
 ## 第一次使用
 
-1. 開啟 Valorant，進到任何畫面都可以（大廳也行）。
-2. 開 OwnClips →「設定」→「偵測」→「擷取遊戲畫面」，在截圖上框出右上角的 killfeed 區域，按「儲存區域」。框的高度要夠放 5～6 行擊殺提示。
+1. 開 OwnClips，讓它開著去打一場就好。對局開始時會自動錄影，結束後出現在「對局」頁。
+2. 如果沒偵測到擊殺（例如螢幕不是 16:9，或改過 HUD），開著 Valorant 到「設定」→「偵測」→「擷取遊戲畫面」，在截圖上框出右上角的 killfeed 區域，按「儲存區域」。框的高度要夠放 5～6 行擊殺提示。
 3. 照需要調整錄影設定：聲音來源、畫面更新率、畫質、存放位置。
-4. 讓 OwnClips 開著，去打一場。
-
-換了解析度或 HUD 設定後，要重新校準一次。
 
 ## 設定
 
@@ -110,7 +116,7 @@ src/                 核心函式庫（app 和命令列共用）
   recorder.rs        內建錄影器
   audio.rs           聲音擷取與混音
   gamestate.rs       讀遊戲記錄檔，判斷對局開始／結束
-  killfeed.rs        從 killfeed 畫面判斷擊殺／死亡
+  killfeed.rs        從 killfeed 畫面判斷擊殺／死亡／助攻
   session.rs         自動錄影流程，產生 .events.json
   clip.rs            用 ffmpeg 匯出片段
   capture.rs         視窗擷取
@@ -119,12 +125,13 @@ src/                 核心函式庫（app 和命令列共用）
 app/                 Tauri 桌面 app
   src-tauri/         後端，提供給前端呼叫的指令
   src/               前端（React + TypeScript）
+  scripts/           打包前準備 ffmpeg 的腳本
 ```
 
 ## 已知限制
 
 - **對局結束後要等一下才看得到影片**：要先把畫面和聲音合成 MP4，36 分鐘的對局大約十幾秒到半分鐘。當機留下的錄影，下次開 app 時會自動合成救回。
 - **助攻偵測的樣本還很少**：目前只用一場競技的 3 次助攻驗證過。偵測不到的黃色畫面會存到 `%APPDATA%\OwnClips\assist_samples\` 供之後調整。
-- **偵測以 1440p 調校**：其他解析度理論上可以用（座標都用相對比例），但還沒實測過。
+- **偵測以 1440p 調校**：其他解析度理論上可以用（座標都用相對比例），但還沒實測過；非 16:9 的螢幕需要自己校準。
 - **安裝檔沒有數位簽章**：安裝時 Windows 會跳出 SmartScreen 警告。
 - **還沒做**：縮到系統匣常駐、開機自動啟動。
