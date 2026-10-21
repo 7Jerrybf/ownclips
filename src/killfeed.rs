@@ -28,9 +28,13 @@ enum Px {
 
 fn classify(p: &image::Rgb<u8>) -> Px {
     let [r, g, b] = p.0.map(i32::from);
-    if r > 190 && g > 190 && b < 160 && (r - g).abs() < 35 && r - b > 70 {
+    // The self frame is ~(224,232,112), warmer where it blends into a red
+    // row; near-white pale yellows (~254,250,153) are map backgrounds.
+    if r > 190 && g > 190 && b < 160 && (r - g).abs() < 35 && r - b > 70 && r < 246 && g < 246 {
         Px::Yellow
-    } else if g > 150 && b > 120 && r < 150 && g - r > 50 {
+    } else if g > 150 && b > 120 && r < 175 && g - r > 35 && b <= g {
+        // Teal (ally) row, including its lighter end next to the portrait;
+        // b <= g keeps light-blue UI backgrounds out.
         Px::Bar
     } else if r > 180 && g < 130 && b < 130 && r - g > 80 {
         Px::Bar
@@ -72,9 +76,11 @@ pub struct SelfRows {
 pub struct KillfeedScan {
     pub kills: SelfRows,
     pub deaths: SelfRows,
-    /// Yellow pixels outside the kill/death rows. Assists are not
-    /// recognized yet (no samples of how they look); frames with stray
-    /// yellow are saved so they can be studied.
+    /// Rows where the local player assisted: their small assist icon (left
+    /// of the killer's portrait) gets the same yellow frame, half a row tall.
+    pub assists: SelfRows,
+    /// Yellow pixels outside the recognized rows; frames with a lot of it
+    /// are saved for study.
     pub stray_yellow: usize,
 }
 
@@ -142,6 +148,47 @@ pub fn scan(img: &RgbImage, row_h: f32) -> KillfeedScan {
         }
     }
 
+    // Assist icons: a thin yellow frame about half a row tall, directly
+    // left of a row (the killer's portrait sits between it and the bar).
+    let mut small_lines = Vec::new();
+    for y in 0..h {
+        for (a, b) in yellow_runs(&grid[y], (0.3 * row_h) as usize) {
+            let yi = y as isize;
+            if (b - a) as f32 <= 1.3 * row_h && yellow_frac(yi - 4, a, b).min(yellow_frac(yi + 4, a, b)) < 0.3 {
+                small_lines.push((y, a, b));
+            }
+        }
+    }
+    let in_rows = |rows: &[(usize, usize)], y0: usize, y1: usize| {
+        rows.iter().any(|&(r0, r1)| y1 + 2 >= r0 && y0 <= r1 + 2)
+    };
+    let mut assist_rows: Vec<(usize, usize)> = Vec::new();
+    for &(y0, a0, b0) in &small_lines {
+        for &(y1, a1, b1) in &small_lines {
+            let dy = y1 as f32 - y0 as f32;
+            if dy < 0.4 * row_h || dy > 0.7 * row_h {
+                continue;
+            }
+            let overlap = b0.min(b1) as isize - a0.max(a1) as isize;
+            if (overlap as f32) < 0.5 * (b0 - a0).min(b1 - a1) as f32 {
+                continue;
+            }
+            // Not part of the player's own kill/death frame.
+            if in_rows(&kill_rows, y0, y1) || in_rows(&death_rows, y0, y1) {
+                continue;
+            }
+            let ym = (y0 + y1) / 2;
+            let (a, b) = (a0.min(a1), b0.max(b1));
+            let near = (b + 1)..(b + 1 + (4.0 * row_h) as usize).min(w);
+            if bar_count(ym, 0..a) < row_h
+                && bar_count(ym, near) > 0.5 * row_h
+                && !assist_rows.iter().any(|&(r, _)| (r as f32 - y0 as f32).abs() < 0.5 * row_h)
+            {
+                assist_rows.push((y0, y1));
+            }
+        }
+    }
+
     // New rows are appended at the bottom of the feed, so the lowest
     // scanline that is mostly row background marks the newest row.
     let feed_bottom = (0..h).rev().find(|&y| bar_count(y, 0..w) >= 2.0 * row_h);
@@ -152,14 +199,19 @@ pub fn scan(img: &RgbImage, row_h: f32) -> KillfeedScan {
 
     let margin = (0.3 * row_h) as usize;
     let in_self_row = |y: usize| {
-        kill_rows.iter().chain(&death_rows).any(|&(y0, y1)| y + margin >= y0 && y <= y1 + margin)
+        kill_rows.iter().chain(&death_rows).chain(&assist_rows).any(|&(y0, y1)| y + margin >= y0 && y <= y1 + margin)
     };
     let stray_yellow = (0..h)
         .filter(|&y| !in_self_row(y))
         .map(|y| grid[y].iter().filter(|&&p| p == Px::Yellow).count())
         .sum();
 
-    KillfeedScan { kills: summarize(&kill_rows), deaths: summarize(&death_rows), stray_yellow }
+    KillfeedScan {
+        kills: summarize(&kill_rows),
+        deaths: summarize(&death_rows),
+        assists: summarize(&assist_rows),
+        stray_yellow,
+    }
 }
 
 /// Turns per-poll row counts into discrete events: an event is counted

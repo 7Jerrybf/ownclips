@@ -1,32 +1,45 @@
-// Built-in recorder (replaces OBS): captures the Valorant window with
-// Windows.Graphics.Capture and feeds the frames, still on the GPU, into a
-// Media Foundation H.264 encoder (hardware accelerated), with audio from
-// audio.rs. H.264/AAC MP4 is what the app's built-in player can play.
+// Built-in recorder (replaces OBS).
 //
-// The same capture also feeds the detector: every DETECT_FRAME_INTERVAL a
-// frame is copied to the CPU into the shared FrameSink, instead of copying
-// every frame as the detection-only capture does.
+// Video: ffmpeg captures the Valorant window itself (gfxcapture, Windows
+// Graphics Capture) and encodes it on the GPU (NVENC when available),
+// keeping the capture's own frame timing (no duplicated or dropped frames).
+// It writes MKV, which stays playable if anything crashes mid-match.
+//
+// Audio: recorded separately by audio.rs, aligned to the performance
+// counter. When recording stops, video and audio are muxed into the final
+// MP4. To line them up we need the performance-counter time of the
+// video's first frame; ffmpeg reports how far into the video it is
+// (out_time) ten times a second, and "now - out_time" can only overshoot
+// the true start (by processing delay), so the minimum over the recording
+// is a tight estimate.
+//
+// A separate low-rate capture (4 fps) feeds the killfeed detector.
+use std::collections::VecDeque;
+use std::fs;
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::process::{Child, ChildStdin, Stdio};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, Result};
-use windows_capture::capture::{CaptureControl, Context, GraphicsCaptureApiHandler};
-use windows_capture::encoder::{
-    AudioSettingsBuilder, ContainerSettingsBuilder, VideoEncoder, VideoSettingsBuilder, VideoSettingsSubType,
-};
-use windows_capture::frame::Frame;
-use windows_capture::graphics_capture_api::InternalCaptureControl;
-use windows_capture::settings::{
-    ColorFormat, CursorCaptureSettings, DirtyRegionSettings, DrawBorderSettings, MinimumUpdateIntervalSettings,
-    SecondaryWindowSettings, Settings,
-};
+use anyhow::{anyhow, Context, Result};
+use serde::{Deserialize, Serialize};
 use windows_capture::window::Window;
 
-use crate::audio::{self, AudioCapture, AudioMode};
-use crate::capture::{FrameData, FrameSink, SharedSink};
+use crate::audio::{self, AudioMode, AudioRecorder};
+use crate::capture::{self, Control, SharedSink};
+use crate::clip;
+use crate::qpc;
 
 const DETECT_FRAME_INTERVAL: Duration = Duration::from_millis(250);
+/// How much later than the true first frame the progress-based estimate
+/// lands: a fixed part plus a few frames of pipeline queueing. Measured
+/// with a flash+beep test page at 30 and 60 fps (residual error ~15 ms).
+fn video_start_bias_ticks(fps: u32) -> i64 {
+    let secs = 0.027 + 2.7 / fps.max(1) as f64;
+    (secs * qpc::TICKS_PER_SEC) as i64
+}
 
 #[derive(Clone, Copy)]
 pub struct RecordSettings {
@@ -35,144 +48,360 @@ pub struct RecordSettings {
     pub audio: AudioMode,
 }
 
-struct Shared {
-    path: PathBuf,
-    settings: RecordSettings,
-    /// Created on the first frame, once the real frame size is known.
-    encoder: Mutex<Option<VideoEncoder>>,
-    /// When the first frame was encoded: time zero of the recording.
-    started: Arc<Mutex<Option<Instant>>>,
-    sink: SharedSink,
-    last_detect_copy: Mutex<Option<Instant>>,
-    error: Mutex<Option<String>>,
+/// Files of one recording. While recording: `<stem>.mkv` (video),
+/// `<stem>.audio.pcm` and `<stem>.rec.json`; afterwards just `<stem>.mp4`.
+#[derive(Clone)]
+struct Files {
+    mp4: PathBuf,
+    mkv: PathBuf,
+    pcm: PathBuf,
+    meta: PathBuf,
 }
 
-struct Handler {
-    shared: Arc<Shared>,
+impl Files {
+    fn for_output(mp4: &Path) -> Self {
+        Self {
+            mp4: mp4.to_path_buf(),
+            mkv: mp4.with_extension("mkv"),
+            pcm: mp4.with_extension("audio.pcm"),
+            meta: mp4.with_extension("rec.json"),
+        }
+    }
 }
 
-type Error = Box<dyn std::error::Error + Send + Sync>;
-
-impl GraphicsCaptureApiHandler for Handler {
-    type Flags = Arc<Shared>;
-    type Error = Error;
-
-    fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
-        Ok(Self { shared: ctx.flags })
-    }
-
-    fn on_frame_arrived(&mut self, frame: &mut Frame<'_>, _control: InternalCaptureControl) -> Result<(), Error> {
-        let s = &self.shared;
-        {
-            let mut encoder = s.encoder.lock().unwrap();
-            if encoder.is_none() {
-                // H.264 needs even dimensions; the encoder pads to this size.
-                let (w, h) = ((frame.width() + 1) & !1, (frame.height() + 1) & !1);
-                let audio_settings = AudioSettingsBuilder::new()
-                    .sample_rate(audio::SAMPLE_RATE)
-                    .channel_count(audio::CHANNELS as u32)
-                    .disabled(s.settings.audio == AudioMode::Off);
-                let video = VideoSettingsBuilder::new(w, h)
-                    .sub_type(VideoSettingsSubType::H264)
-                    .frame_rate(s.settings.fps)
-                    .bitrate(s.settings.bitrate_mbps * 1_000_000);
-                *encoder = Some(VideoEncoder::new(video, audio_settings, ContainerSettingsBuilder::new(), &s.path)?);
-                *s.started.lock().unwrap() = Some(Instant::now());
-            }
-            if let Err(e) = encoder.as_mut().unwrap().send_frame(frame) {
-                *s.error.lock().unwrap() = Some(e.to_string());
-                return Err(e.into());
-            }
-        }
-
-        let mut last = s.last_detect_copy.lock().unwrap();
-        if last.is_none_or(|t| t.elapsed() >= DETECT_FRAME_INTERVAL) {
-            *last = Some(Instant::now());
-            let buffer = frame.buffer()?;
-            let (width, height) = (buffer.width(), buffer.height());
-            let mut scratch = Vec::new();
-            let mut rgba = buffer.as_nopadding_buffer(&mut scratch).to_vec();
-            // Captured as BGRA for the encoder; the detector expects RGBA.
-            for px in rgba.chunks_exact_mut(4) {
-                px.swap(0, 2);
-            }
-            let mut sink = s.sink.lock().unwrap();
-            sink.latest = Some(FrameData { width, height, rgba });
-            sink.generation = sink.generation.wrapping_add(1);
-        }
-        Ok(())
-    }
+/// Timing needed to mux the audio, saved so a crashed recording can still
+/// be finished later.
+#[derive(Serialize, Deserialize, Default, Clone, Copy)]
+struct RecMeta {
+    audio_start: u64,
+    video_start: Option<u64>,
+    #[serde(default)]
+    fps: u32,
 }
 
 pub struct Recorder {
-    control: Option<CaptureControl<Handler, Error>>,
-    audio: Option<AudioCapture>,
-    shared: Arc<Shared>,
+    files: Files,
+    ffmpeg: Child,
+    stdin: Option<ChildStdin>,
+    audio: Option<AudioRecorder>,
+    audio_start: u64,
+    video_start: Arc<Mutex<Option<u64>>>,
+    fps: u32,
+    detect: Option<Control>,
+    sink: SharedSink,
+    log: Arc<Mutex<VecDeque<String>>>,
 }
 
 impl Recorder {
-    /// Starts recording `window` into `path` (an .mp4).
-    pub fn start(window: Window, path: &Path, settings: RecordSettings) -> Result<Self> {
-        let shared = Arc::new(Shared {
-            path: path.to_path_buf(),
-            settings,
-            encoder: Mutex::new(None),
-            started: Arc::new(Mutex::new(None)),
-            sink: Arc::new(Mutex::new(FrameSink::default())),
-            last_detect_copy: Mutex::new(None),
-            error: Mutex::new(None),
-        });
-
+    /// Starts recording `window`; the finished file will be `mp4`.
+    pub fn start(window: Window, mp4: &Path, settings: RecordSettings) -> Result<Self> {
+        let files = Files::for_output(mp4);
+        let encoder = pick_encoder()?;
+        let hwnd = window.as_raw_hwnd() as usize;
         let pid = window.process_id().map_err(|e| anyhow!("讀取遊戲程序 ID 失敗: {e}"))?;
-        let audio_shared = shared.clone();
-        let audio = AudioCapture::start(settings.audio, pid, shared.started.clone(), move |pcm| {
-            if let Some(enc) = audio_shared.encoder.lock().unwrap().as_mut() {
-                let _ = enc.send_audio_buffer(pcm, 0);
-            }
-        })?;
 
-        let capture_settings = Settings::new(
-            window,
-            CursorCaptureSettings::WithoutCursor,
-            DrawBorderSettings::WithoutBorder,
-            SecondaryWindowSettings::Default,
-            MinimumUpdateIntervalSettings::Custom(Duration::from_secs_f64(1.0 / settings.fps as f64)),
-            DirtyRegionSettings::Default,
-            ColorFormat::Bgra8,
-            shared.clone(),
+        let audio_start = qpc::now();
+        let audio = AudioRecorder::start(settings.audio, pid, audio_start, &files.pcm)?;
+        save_meta(&files, RecMeta { audio_start, video_start: None, fps: settings.fps });
+
+        // Capture at the display's own pace and let the fps filter pick the
+        // frame nearest each slot of a steady grid. Throttling the capture
+        // itself to the target rate instead lands frames on multiples of the
+        // refresh interval (e.g. 6.06 ms at 165 Hz), giving uneven spacing.
+        let filter = format!(
+            "gfxcapture=hwnd={hwnd}:max_framerate=240:capture_cursor=0:width=-2:height=-2,fps={}{}",
+            settings.fps, encoder.filter
         );
-        let control = Handler::start_free_threaded(capture_settings).map_err(|e| anyhow!("啟動錄影失敗: {e}"))?;
-        Ok(Self { control: Some(control), audio, shared })
+        let mut cmd = clip::ffmpeg()?;
+        cmd.args(["-hide_banner", "-loglevel", "warning", "-stats_period", "0.1", "-progress", "pipe:2"])
+            .args(["-filter_complex", &filter, "-fps_mode", "passthrough"])
+            .args((encoder.args)(settings.fps, settings.bitrate_mbps))
+            .args(["-f", "matroska", "-y"])
+            .arg(&files.mkv)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        let mut ffmpeg = cmd.spawn().context("無法啟動 ffmpeg")?;
+
+        let video_start = Arc::new(Mutex::new(None));
+        let log = Arc::new(Mutex::new(VecDeque::new()));
+        let stderr = ffmpeg.stderr.take().unwrap();
+        let (vs, lg) = (video_start.clone(), log.clone());
+        thread::spawn(move || read_progress(stderr, &vs, &lg));
+
+        let detect_window = Window::from_raw_hwnd(hwnd as *mut std::ffi::c_void);
+        let (detect, sink) = capture::start_capture_every(detect_window, Some(DETECT_FRAME_INTERVAL))?;
+
+        Ok(Self {
+            files,
+            stdin: ffmpeg.stdin.take(),
+            ffmpeg,
+            audio,
+            audio_start,
+            video_start,
+            fps: settings.fps,
+            detect: Some(detect),
+            sink,
+            log,
+        })
     }
 
     /// Latest frames for the detector.
     pub fn frames(&self) -> SharedSink {
-        self.shared.sink.clone()
+        self.sink.clone()
     }
 
-    /// Seconds since the recording's first frame: the position in the video.
+    /// Seconds since the video's first frame: the position in the video.
     pub fn elapsed(&self) -> Option<f64> {
-        self.shared.started.lock().unwrap().map(|t| t.elapsed().as_secs_f64())
+        let start = (*self.video_start.lock().unwrap())? as i64 - video_start_bias_ticks(self.fps);
+        Some((qpc::now() as i64 - start).max(0) as f64 / qpc::TICKS_PER_SEC)
     }
 
-    /// An encoding error, if the recording has failed.
-    pub fn error(&self) -> Option<String> {
-        self.shared.error.lock().unwrap().clone()
+    /// Why the recording failed, if ffmpeg has quit on its own.
+    pub fn error(&mut self) -> Option<String> {
+        match self.ffmpeg.try_wait() {
+            Ok(Some(status)) => {
+                let tail: Vec<String> = self.log.lock().unwrap().iter().cloned().collect();
+                Some(format!("ffmpeg 結束了({status}): {}", tail.join(" / ")))
+            }
+            _ => None,
+        }
     }
 
-    /// Stops capturing and finalizes the file.
-    pub fn stop(mut self) -> Result<PathBuf> {
+    /// Stops recording. The returned recording still has to be finished
+    /// (muxed) with [`Stopped::finish`], which takes a while.
+    pub fn stop(mut self) -> Result<Stopped> {
+        if let Some(c) = self.detect.take() {
+            let _ = c.stop();
+        }
+        // "q" asks ffmpeg to finish the file cleanly.
+        if let Some(mut stdin) = self.stdin.take() {
+            let _ = stdin.write_all(b"q\n");
+        }
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            match self.ffmpeg.try_wait() {
+                Ok(Some(_)) => break,
+                _ if Instant::now() > deadline => {
+                    let _ = self.ffmpeg.kill();
+                    let _ = self.ffmpeg.wait();
+                    break;
+                }
+                _ => thread::sleep(Duration::from_millis(50)),
+            }
+        }
         if let Some(audio) = self.audio.take() {
-            audio.stop();
+            audio.stop()?;
         }
-        if let Some(control) = self.control.take() {
-            let _ = control.stop();
-        }
-        let encoder = self.shared.encoder.lock().unwrap().take();
-        match encoder {
-            Some(enc) => enc.finish().map_err(|e| anyhow!("錄影檔收尾失敗: {e}"))?,
-            None => return Err(anyhow!("沒有錄到任何畫面(遊戲視窗是否被最小化?)")),
-        }
-        Ok(self.shared.path.clone())
+        let meta = RecMeta { audio_start: self.audio_start, video_start: *self.video_start.lock().unwrap(), fps: self.fps };
+        save_meta(&self.files, meta);
+        Ok(Stopped { files: self.files, meta })
     }
+}
+
+/// A recording that has stopped but not yet been muxed into its MP4.
+pub struct Stopped {
+    files: Files,
+    meta: RecMeta,
+}
+
+impl Stopped {
+    /// Muxes video and audio into the final MP4 and removes the temporary
+    /// files; returns the MP4's path.
+    pub fn finish(self) -> Result<PathBuf> {
+        finish_files(&self.files, self.meta)
+    }
+
+    /// Deletes everything (a false start).
+    pub fn discard(self) {
+        for p in [&self.files.mkv, &self.files.pcm, &self.files.meta, &self.files.mp4] {
+            let _ = fs::remove_file(p);
+        }
+    }
+}
+
+/// Finishes recordings left unfinished by a crash; returns their MP4s.
+pub fn recover_unfinished(dir: &Path) -> Vec<Result<PathBuf>> {
+    let metas: Vec<PathBuf> = fs::read_dir(dir)
+        .map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).collect())
+        .unwrap_or_default();
+    metas
+        .into_iter()
+        .filter(|p| p.to_string_lossy().ends_with(".rec.json"))
+        .filter_map(|meta_path| {
+            let name = meta_path.file_name()?.to_string_lossy().into_owned();
+            let mp4 = meta_path.with_file_name(name.strip_suffix(".rec.json")?.to_string() + ".mp4");
+            let files = Files::for_output(&mp4);
+            let meta: RecMeta = serde_json::from_str(&fs::read_to_string(&meta_path).ok()?).ok()?;
+            if !files.mkv.exists() {
+                let _ = fs::remove_file(&meta_path);
+                return None;
+            }
+            Some(finish_files(&files, meta))
+        })
+        .collect()
+}
+
+fn save_meta(files: &Files, meta: RecMeta) {
+    if let Ok(json) = serde_json::to_string(&meta) {
+        let _ = fs::write(&files.meta, json);
+    }
+}
+
+fn finish_files(files: &Files, meta: RecMeta) -> Result<PathBuf> {
+    let has_audio = fs::metadata(&files.pcm).is_ok_and(|m| m.len() > 0);
+    let mut cmd = clip::ffmpeg()?;
+    cmd.args(["-hide_banner", "-loglevel", "error", "-y", "-i"]).arg(&files.mkv);
+    if has_audio {
+        // Audio sample 0 is at `audio_start`, video frame 0 at `video_start`.
+        let video_start =
+            meta.video_start.map_or(meta.audio_start as i64, |v| v as i64 - video_start_bias_ticks(meta.fps.max(30)));
+        let skip = (video_start - meta.audio_start as i64) as f64 / qpc::TICKS_PER_SEC;
+        if skip >= 0.0 {
+            cmd.args(["-ss", &format!("{skip:.4}")]);
+        } else {
+            cmd.args(["-itsoffset", &format!("{:.4}", -skip)]);
+        }
+        cmd.args(["-f", "s16le", "-ar", &audio::SAMPLE_RATE.to_string(), "-ac", &audio::CHANNELS.to_string(), "-i"])
+            .arg(&files.pcm)
+            .args(["-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k"]);
+    } else {
+        cmd.args(["-c", "copy"]);
+    }
+    let status = cmd.args(["-movflags", "+faststart"]).arg(&files.mp4).status()?;
+    if !status.success() {
+        return Err(anyhow!("合成錄影檔失敗,原始檔保留在: {}", files.mkv.display()));
+    }
+    for p in [&files.mkv, &files.pcm, &files.meta] {
+        let _ = fs::remove_file(p);
+    }
+    Ok(files.mp4.clone())
+}
+
+fn read_progress(stderr: std::process::ChildStderr, video_start: &Mutex<Option<u64>>, log: &Mutex<VecDeque<String>>) {
+    for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+        let now = qpc::now();
+        if let Some(us) = line.strip_prefix("out_time_us=").and_then(|v| v.trim().parse::<i64>().ok()) {
+            if us > 0 {
+                let estimate = now.saturating_sub(us as u64 * 10);
+                let mut vs = video_start.lock().unwrap();
+                *vs = Some(vs.map_or(estimate, |v| v.min(estimate)));
+            }
+        } else if !line.contains('=') {
+            let mut log = log.lock().unwrap();
+            log.push_back(line);
+            if log.len() > 8 {
+                log.pop_front();
+            }
+        }
+    }
+}
+
+struct Encoder {
+    name: &'static str,
+    /// Appended to the capture filter (e.g. download + colour conversion).
+    filter: &'static str,
+    args: fn(u32, u32) -> Vec<String>,
+}
+
+const SW_CONVERT: &str = ",hwdownload,format=bgra,scale=out_color_matrix=bt709:out_range=tv,format=nv12";
+
+fn rate_args(fps: u32, mbps: u32) -> Vec<String> {
+    vec![
+        "-b:v".into(),
+        format!("{mbps}M"),
+        "-maxrate".into(),
+        format!("{}M", mbps * 3 / 2),
+        "-bufsize".into(),
+        format!("{}M", mbps * 2),
+        "-g".into(),
+        (fps * 2).to_string(),
+    ]
+}
+
+fn bt709_tags() -> Vec<String> {
+    ["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709", "-color_range", "tv"]
+        .map(String::from)
+        .to_vec()
+}
+
+const ENCODERS: [Encoder; 4] = [
+    // NVENC takes the captured GPU frames directly and converts BGRA to
+    // limited-range BT.601 YUV itself (measured), but would tag the stream
+    // as RGB: setparams (container tags) and h264_metadata (bitstream tags)
+    // label it correctly.
+    Encoder {
+        name: "h264_nvenc",
+        filter: ",setparams=range=tv:color_primaries=bt709:color_trc=bt709:colorspace=smpte170m",
+        args: |fps, mbps| {
+            // "-delay 0" hands each packet out as soon as it is encoded, so
+            // the progress-based start estimate isn't skewed by buffering.
+            let mut a: Vec<String> = ["-c:v", "h264_nvenc", "-preset", "p5", "-tune", "hq", "-rc", "vbr", "-delay", "0"]
+                .map(String::from)
+                .to_vec();
+            a.extend(rate_args(fps, mbps));
+            a.extend(
+                [
+                    "-bsf:v",
+                    "h264_metadata=video_full_range_flag=0:colour_primaries=1:transfer_characteristics=1:matrix_coefficients=6",
+                ]
+                .map(String::from),
+            );
+            a
+        },
+    },
+    Encoder {
+        name: "h264_amf",
+        filter: SW_CONVERT,
+        args: |fps, mbps| {
+            let mut a: Vec<String> = ["-c:v", "h264_amf", "-quality", "balanced", "-rc", "vbr_peak"].map(String::from).to_vec();
+            a.extend(rate_args(fps, mbps));
+            a.extend(bt709_tags());
+            a
+        },
+    },
+    Encoder {
+        name: "h264_qsv",
+        filter: SW_CONVERT,
+        args: |fps, mbps| {
+            let mut a: Vec<String> = ["-c:v", "h264_qsv", "-preset", "medium"].map(String::from).to_vec();
+            a.extend(rate_args(fps, mbps));
+            a.extend(bt709_tags());
+            a
+        },
+    },
+    Encoder {
+        name: "libx264",
+        filter: SW_CONVERT,
+        args: |fps, mbps| {
+            let mut a: Vec<String> = ["-c:v", "libx264", "-preset", "veryfast"].map(String::from).to_vec();
+            a.extend(rate_args(fps, mbps));
+            a.extend(bt709_tags());
+            a
+        },
+    },
+];
+
+/// The first encoder that actually works on this PC (an encoder can be
+/// compiled into ffmpeg without the matching GPU being present).
+fn pick_encoder() -> Result<&'static Encoder> {
+    static PICKED: OnceLock<Option<usize>> = OnceLock::new();
+    let idx = PICKED.get_or_init(|| {
+        ENCODERS.iter().position(|e| {
+            clip::ffmpeg().is_ok_and(|mut c| {
+                c.args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=s=640x360:d=0.2"])
+                    .args(["-frames:v", "3", "-pix_fmt", "nv12", "-c:v", e.name, "-f", "null", "-"])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .is_ok_and(|s| s.success())
+            })
+        })
+    });
+    idx.map(|i| &ENCODERS[i]).ok_or_else(|| anyhow!("找不到可用的影片編碼器(ffmpeg 是否已安裝?)"))
+}
+
+/// Which encoder recordings use, for display.
+pub fn encoder_name() -> Option<&'static str> {
+    pick_encoder().ok().map(|e| e.name)
 }

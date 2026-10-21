@@ -39,6 +39,7 @@ struct RecorderStatus {
     started_at: Option<i64>,
     kills: u32,
     deaths: u32,
+    assists: u32,
     last_error: Option<String>,
 }
 
@@ -101,9 +102,19 @@ fn apply_notice(app: &AppHandle, status: &Mutex<RecorderStatus>, notice: Notice)
                 match kind {
                     EventKind::Kill => s.kills += 1,
                     EventKind::Death => s.deaths += 1,
-                    EventKind::Assist => {}
+                    EventKind::Assist => s.assists += 1,
                 }
                 None
+            }
+            Notice::Processing { .. } => {
+                *s = RecorderStatus { state: "waiting".into(), ..Default::default() };
+                let _ = app.emit("library-changed", ());
+                Some(Toast { kind: "info".into(), message: "對局結束,正在合成錄影檔…".into() })
+            }
+            Notice::Recovered { video } => {
+                let _ = app.emit("library-changed", ());
+                let name = video.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                Some(Toast { kind: "success".into(), message: format!("已救回上次未完成的錄影 {name}") })
             }
             Notice::Stopped { clips, .. } => {
                 *s = RecorderStatus { state: "waiting".into(), ..Default::default() };
@@ -196,13 +207,16 @@ fn list_matches(bg: State<Background>) -> CmdResult<Vec<MatchSummary>> {
     let mut out: Vec<MatchSummary> = dir_files(&dir)
         .into_iter()
         .filter(|p| clip::is_video(p))
+        // An .mkv is a recording still in progress or being muxed; once the
+        // .mp4 exists that one is the match.
+        .filter(|p| !(is_mkv(p) && p.with_extension("mp4").exists()))
         .filter_map(|p| {
             let info = MatchInfo::load(&p)?;
             let video = p.to_string_lossy().into_owned();
             Some(MatchSummary {
                 name: p.file_stem()?.to_string_lossy().into_owned(),
                 size: fs::metadata(&p).map(|m| m.len()).unwrap_or(0),
-                recording: current.as_deref() == Some(video.as_str()),
+                recording: is_mkv(&p) || current.as_deref() == Some(video.as_str()),
                 video,
                 info,
             })
@@ -245,6 +259,19 @@ fn list_clips() -> CmdResult<Vec<ClipSummary>> {
         .collect();
     out.sort_by(|a, b| b.name.cmp(&a.name));
     Ok(out)
+}
+
+fn is_mkv(p: &Path) -> bool {
+    p.extension().is_some_and(|e| e.eq_ignore_ascii_case("mkv"))
+}
+
+/// The first call probes the encoders with ffmpeg, so keep it off the UI thread.
+#[tauri::command]
+async fn encoder_name() -> Option<String> {
+    tauri::async_runtime::spawn_blocking(|| ownclips::recorder::encoder_name().map(String::from))
+        .await
+        .ok()
+        .flatten()
 }
 
 fn thumb_path(video: &Path) -> PathBuf {
@@ -392,6 +419,7 @@ fn main() {
             save_config,
             recordings_dir,
             ffmpeg_available,
+            encoder_name,
             list_matches,
             list_clips,
             thumbnail,

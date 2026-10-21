@@ -68,7 +68,7 @@ export function MatchesView({
                   <Thumb path={m.video} at={thumbTime(m)} disabled={m.recording} />
                   <div className="shade" />
                   <div className="badge-tl">
-                    {m.recording && <span className="chip rec">● 錄影中</span>}
+                    {m.recording && <span className="chip rec">● 錄影 / 處理中</span>}
                     <span className="chip">{m.info.mode}</span>
                   </div>
                   <div className="corner">

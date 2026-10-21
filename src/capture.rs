@@ -101,14 +101,20 @@ pub fn find_valorant_window() -> Result<Window> {
 /// Starts a background capture of `window` and returns a handle to stop it
 /// plus a shared sink that always holds the most recent frame.
 pub fn start_capture(window: Window) -> Result<(Control, SharedSink)> {
+    start_capture_every(window, None)
+}
+
+/// Like [`start_capture`], but delivering at most one frame per `interval`
+/// (every frame is copied to the CPU, so throttle long-running captures).
+pub fn start_capture_every(window: Window, interval: Option<std::time::Duration>) -> Result<(Control, SharedSink)> {
     let sink: SharedSink = Arc::new(Mutex::new(FrameSink::default()));
 
     let settings = Settings::new(
         window,
-        CursorCaptureSettings::Default,
-        DrawBorderSettings::Default,
+        CursorCaptureSettings::WithoutCursor,
+        DrawBorderSettings::WithoutBorder,
         SecondaryWindowSettings::Default,
-        MinimumUpdateIntervalSettings::Default,
+        interval.map_or(MinimumUpdateIntervalSettings::Default, MinimumUpdateIntervalSettings::Custom),
         DirtyRegionSettings::Default,
         ColorFormat::Rgba8,
         sink.clone(),

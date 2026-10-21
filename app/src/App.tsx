@@ -130,6 +130,7 @@ function StatusCard({
         <div className="status-kd num">
           <span style={{ color: "var(--kill)" }}>{status.kills} 擊殺</span>
           <span style={{ color: "var(--death)" }}>{status.deaths} 死亡</span>
+          <span style={{ color: "var(--assist)" }}>{status.assists} 助攻</span>
         </div>
       </div>
     );

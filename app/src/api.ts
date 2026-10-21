@@ -62,6 +62,7 @@ export interface RecorderStatus {
   started_at: number | null;
   kills: number;
   deaths: number;
+  assists: number;
   last_error: string | null;
 }
 
@@ -82,6 +83,7 @@ export const api = {
   saveConfig: (cfg: Config) => invoke<void>("save_config", { cfg }),
   recordingsDir: () => invoke<string>("recordings_dir"),
   ffmpegAvailable: () => invoke<boolean>("ffmpeg_available"),
+  encoderName: () => invoke<string | null>("encoder_name"),
   listMatches: () => invoke<MatchSummary[]>("list_matches"),
   listClips: () => invoke<ClipSummary[]>("list_clips"),
   thumbnail: (path: string, at: number) => invoke<string>("thumbnail", { path, at }),

@@ -1,30 +1,39 @@
 // Audio for the built-in recorder: captures one or two WASAPI sources and
-// mixes them into the 48 kHz / stereo / 16-bit PCM the video encoder takes.
+// writes them, mixed, as raw 48 kHz / stereo / 16-bit PCM to a file that is
+// muxed with the video when the recording ends.
 //
-// Loopback sources deliver nothing while nothing is playing, so the
-// encoder's audio clock cannot simply follow the packets that arrive. A
-// mixer thread instead emits audio on the wall clock (padding with silence),
-// running a fixed delay behind real time so each source has slack to deliver
-// its packets; a source that falls far behind or runs ahead is trimmed so
-// latency stays bounded.
+// Every WASAPI packet carries the performance-counter time of its first
+// sample, so each packet is placed at its true position relative to
+// `start` (qpc.rs). That keeps audio in sync with the video even across the
+// silences in which loopback capture delivers no packets at all. Packets
+// that follow on from the previous one are joined seamlessly; a jump in
+// time (after silence, or clock drift) is honoured by inserting silence.
+// The writer stays a fixed delay behind real time so late packets still
+// land where they belong.
 use std::collections::VecDeque;
+use std::fs::File;
+use std::io::{BufWriter, Write};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use wasapi::{AudioClient, DeviceEnumerator, Direction, SampleType, StreamMode, WaveFormat};
 
+use crate::qpc;
+
 pub const SAMPLE_RATE: u32 = 48_000;
 pub const CHANNELS: usize = 2;
 
-/// How far behind real time the mixer runs.
-const MIX_DELAY: Duration = Duration::from_millis(150);
-/// A source buffering more than this is trimmed back (it ran ahead).
-const MAX_BUFFERED: Duration = Duration::from_millis(500);
-const MIX_TICK: Duration = Duration::from_millis(20);
+/// How far behind real time the writer runs.
+const WRITE_DELAY_TICKS: u64 = 4_000_000; // 400 ms
+const WRITE_TICK: Duration = Duration::from_millis(50);
+/// Packets this close to where the previous one ended are treated as
+/// contiguous (WASAPI timestamps jitter by a few ms).
+const CONTIGUOUS_TOLERANCE: i64 = SAMPLE_RATE as i64 / 50; // 20 ms
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -46,23 +55,44 @@ enum Source {
     Microphone,
 }
 
-type SampleBuf = Arc<Mutex<VecDeque<f32>>>;
-
-pub struct AudioCapture {
-    stop: Arc<AtomicBool>,
-    threads: Vec<JoinHandle<()>>,
+/// One source's not-yet-written samples, starting at absolute frame `start`
+/// (frames counted from the recording's `start` time).
+#[derive(Default)]
+struct Pending {
+    start: i64,
+    samples: VecDeque<f32>,
 }
 
-impl AudioCapture {
-    /// Starts capturing for `mode`. Mixed PCM is handed to `sink` in small
-    /// chunks once `start_at` has been set (the moment the first video frame
-    /// was encoded, so both tracks share time zero).
-    pub fn start(
-        mode: AudioMode,
-        game_pid: u32,
-        start_at: Arc<Mutex<Option<Instant>>>,
-        sink: impl FnMut(&[u8]) + Send + 'static,
-    ) -> Result<Option<Self>> {
+impl Pending {
+    fn end(&self) -> i64 {
+        self.start + (self.samples.len() / CHANNELS) as i64
+    }
+
+    /// Adds a packet whose first frame belongs at `pos`.
+    fn push(&mut self, pos: i64, data: &[f32]) {
+        if self.samples.is_empty() {
+            self.start = pos;
+        } else {
+            let gap = pos - self.end();
+            if gap > CONTIGUOUS_TOLERANCE {
+                self.samples.extend(std::iter::repeat_n(0.0, gap as usize * CHANNELS));
+            }
+            // Smaller gaps and overlaps are timestamp jitter: append as-is.
+        }
+        self.samples.extend(data);
+    }
+}
+
+pub struct AudioRecorder {
+    stop: Arc<AtomicBool>,
+    threads: Vec<JoinHandle<()>>,
+    writer: Option<JoinHandle<Result<()>>>,
+}
+
+impl AudioRecorder {
+    /// Starts recording `mode` into `out` (raw s16le), with sample 0 at
+    /// performance-counter time `start`.
+    pub fn start(mode: AudioMode, game_pid: u32, start: u64, out: &Path) -> Result<Option<Self>> {
         let sources = match mode {
             AudioMode::Off => return Ok(None),
             AudioMode::Game => vec![Source::Process(game_pid)],
@@ -72,19 +102,19 @@ impl AudioCapture {
 
         let stop = Arc::new(AtomicBool::new(false));
         let mut threads = Vec::new();
-        let mut bufs = Vec::new();
+        let mut pendings = Vec::new();
         for source in sources {
-            let buf: SampleBuf = Arc::default();
+            let pending: Arc<Mutex<Pending>> = Arc::default();
             let (ready_tx, ready_rx) = std::sync::mpsc::channel();
-            let (stop2, buf2) = (stop.clone(), buf.clone());
+            let (stop2, pending2) = (stop.clone(), pending.clone());
             threads.push(thread::spawn(move || {
-                if let Err(e) = capture_source(source, &buf2, &stop2, &ready_tx) {
+                if let Err(e) = capture_source(source, start, &pending2, &stop2, &ready_tx) {
                     let _ = ready_tx.send(Err(e.to_string()));
                 }
             }));
             // Surface setup errors (no microphone, bad pid...) right away.
             match ready_rx.recv_timeout(Duration::from_secs(5)) {
-                Ok(Ok(())) => bufs.push(buf),
+                Ok(Ok(())) => pendings.push(pending),
                 Ok(Err(e)) => {
                     stop.store(true, Ordering::Relaxed);
                     return Err(anyhow!("啟動聲音擷取失敗: {e}"));
@@ -96,28 +126,38 @@ impl AudioCapture {
             }
         }
 
+        let file = BufWriter::with_capacity(1 << 20, File::create(out)?);
         let stop2 = stop.clone();
-        threads.push(thread::spawn(move || mix_loop(bufs, start_at, &stop2, sink)));
-        Ok(Some(Self { stop, threads }))
+        let writer = thread::spawn(move || write_loop(pendings, start, file, &stop2));
+        Ok(Some(Self { stop, threads, writer: Some(writer) }))
     }
 
-    pub fn stop(self) {
+    /// Stops capturing and writes everything up to now.
+    pub fn stop(mut self) -> Result<()> {
         self.stop.store(true, Ordering::Relaxed);
-        for t in self.threads {
+        for t in self.threads.drain(..) {
             let _ = t.join();
+        }
+        match self.writer.take().map(|w| w.join()) {
+            Some(Ok(r)) => r,
+            Some(Err(_)) => Err(anyhow!("聲音寫入執行緒當掉了")),
+            None => Ok(()),
         }
     }
 }
 
+fn frames_since(start: u64, t: u64) -> i64 {
+    ((t as i128 - start as i128) * SAMPLE_RATE as i128 / qpc::TICKS_PER_SEC as i128) as i64
+}
+
 fn capture_source(
     source: Source,
-    buf: &SampleBuf,
+    start: u64,
+    pending: &Mutex<Pending>,
     stop: &AtomicBool,
     ready: &std::sync::mpsc::Sender<Result<(), String>>,
 ) -> Result<()> {
-    wasapi::initialize_mta()
-        .ok()
-        .map_err(|e| anyhow!("COM 初始化失敗: {e}"))?;
+    wasapi::initialize_mta().ok().map_err(|e| anyhow!("COM 初始化失敗: {e}"))?;
     let format = WaveFormat::new(32, 32, &SampleType::Float, SAMPLE_RATE as usize, CHANNELS, None);
     let mode = StreamMode::EventsShared { autoconvert: true, buffer_duration_hns: 0 };
 
@@ -140,60 +180,75 @@ fn capture_source(
             continue;
         }
         while capture.get_next_packet_size()?.unwrap_or(0) > 0 {
-            capture.read_from_device_to_deque(&mut raw)?;
+            raw.clear();
+            let info = capture.read_from_device_to_deque(&mut raw)?;
+            let frames = raw.len() / (4 * CHANNELS);
+            if frames == 0 {
+                continue;
+            }
+            // Some loopback clients report no timestamp; then assume the
+            // packet just finished playing.
+            let t = if info.timestamp > 0 && !info.flags.timestamp_error {
+                info.timestamp
+            } else {
+                qpc::now().saturating_sub(frames as u64 * qpc::TICKS_PER_SEC as u64 / SAMPLE_RATE as u64)
+            };
+            let data: Vec<f32> = if info.flags.silent {
+                vec![0.0; frames * CHANNELS]
+            } else {
+                raw.make_contiguous()
+                    .chunks_exact(4)
+                    .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                    .collect()
+            };
+            pending.lock().unwrap().push(frames_since(start, t), &data);
         }
-        let whole = raw.len() / 4 * 4;
-        let mut out = buf.lock().unwrap();
-        out.extend(raw.drain(..whole).collect::<Vec<u8>>().chunks_exact(4).map(|b| {
-            f32::from_le_bytes([b[0], b[1], b[2], b[3]])
-        }));
     }
     let _ = client.stop_stream();
     Ok(())
 }
 
-fn mix_loop(
-    bufs: Vec<SampleBuf>,
-    start_at: Arc<Mutex<Option<Instant>>>,
-    stop: &AtomicBool,
-    mut sink: impl FnMut(&[u8]),
-) {
-    let samples_for = |d: Duration| (d.as_secs_f64() * SAMPLE_RATE as f64) as u64;
-    let max_buffered = samples_for(MAX_BUFFERED) as usize * CHANNELS;
-    let mut sent_frames: u64 = 0;
+fn write_loop(pendings: Vec<Arc<Mutex<Pending>>>, start: u64, mut out: BufWriter<File>, stop: &AtomicBool) -> Result<()> {
+    let mut written: i64 = 0;
     let mut mix: Vec<f32> = Vec::new();
     let mut pcm: Vec<u8> = Vec::new();
-
-    while !stop.load(Ordering::Relaxed) {
-        thread::sleep(MIX_TICK);
-        let Some(start) = *start_at.lock().unwrap() else {
-            // Not recording video yet: drop what arrives so it can't pile up.
-            for b in &bufs {
-                b.lock().unwrap().clear();
-            }
-            continue;
-        };
-        let target = samples_for(start.elapsed().saturating_sub(MIX_DELAY));
-        if target <= sent_frames {
-            continue;
+    loop {
+        let stopping = stop.load(Ordering::Relaxed);
+        if !stopping {
+            thread::sleep(WRITE_TICK);
         }
-        let frames = (target - sent_frames) as usize;
-        mix.clear();
-        mix.resize(frames * CHANNELS, 0.0);
-        for b in &bufs {
-            let mut b = b.lock().unwrap();
-            if b.len() > max_buffered + mix.len() {
-                let excess = b.len() - max_buffered;
-                b.drain(..excess / CHANNELS * CHANNELS);
+        // When stopping, flush everything that has arrived.
+        let horizon = if stopping { qpc::now() } else { qpc::now().saturating_sub(WRITE_DELAY_TICKS) };
+        let target = frames_since(start, horizon);
+        if target > written {
+            let n = (target - written) as usize;
+            mix.clear();
+            mix.resize(n * CHANNELS, 0.0);
+            for p in &pendings {
+                let mut p = p.lock().unwrap();
+                // Drop anything that arrived too late to be placed.
+                if p.start < written {
+                    let late = ((written - p.start) as usize * CHANNELS).min(p.samples.len());
+                    p.samples.drain(..late);
+                    p.start = written;
+                }
+                let offset = (p.start - written).max(0) as usize;
+                if offset < n {
+                    let take = ((n - offset) * CHANNELS).min(p.samples.len());
+                    for (m, s) in mix[offset * CHANNELS..].iter_mut().zip(p.samples.drain(..take)) {
+                        *m += s;
+                    }
+                    p.start += (take / CHANNELS) as i64;
+                }
             }
-            let n = mix.len().min(b.len());
-            for (m, s) in mix.iter_mut().zip(b.drain(..n)) {
-                *m += s;
-            }
+            pcm.clear();
+            pcm.extend(mix.iter().flat_map(|s| ((s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16).to_le_bytes()));
+            out.write_all(&pcm)?;
+            written = target;
         }
-        pcm.clear();
-        pcm.extend(mix.iter().flat_map(|s| ((s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16).to_le_bytes()));
-        sink(&pcm);
-        sent_frames = target;
+        if stopping {
+            out.flush()?;
+            return Ok(());
+        }
     }
 }

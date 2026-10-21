@@ -17,12 +17,14 @@ export function SettingsView({ notify }: { notify: (message: string, kind?: "err
   const [cfg, setCfg] = useState<Config | null>(null);
   const [dir, setDir] = useState("");
   const [ffmpeg, setFfmpeg] = useState<boolean | null>(null);
+  const [encoder, setEncoder] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const first = useRef(true);
 
   useEffect(() => {
     api.getConfig().then(setCfg).catch((e) => notify(String(e), "error"));
     api.ffmpegAvailable().then(setFfmpeg);
+    api.encoderName().then(setEncoder).catch(() => {});
   }, [notify]);
 
   useEffect(() => {
@@ -79,6 +81,19 @@ export function SettingsView({ notify }: { notify: (message: string, kind?: "err
                 <span>{a.desc}</span>
               </button>
             ))}
+          </div>
+          <div className="field">
+            <div className="field-label">
+              <b>影片編碼器</b>
+              <span>
+                {encoder === "h264_nvenc"
+                  ? "NVIDIA 顯示卡硬體編碼,幾乎不影響遊戲效能"
+                  : encoder
+                    ? "自動選擇的編碼器"
+                    : "偵測中…(需要 ffmpeg)"}
+              </span>
+            </div>
+            <span className="chip">{encoder ?? "—"}</span>
           </div>
           <div className="field">
             <div className="field-label">

@@ -36,7 +36,8 @@ pub fn run() -> Result<()> {
     let mut videos: Vec<PathBuf> = fs::read_dir(&dir)
         .with_context(|| format!("讀取錄影資料夾失敗: {}", dir.display()))?
         .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| is_video(p) && MatchInfo::path_for(p).exists())
+        // Only finished recordings (an .mkv is still being recorded or muxed).
+        .filter(|p| p.extension().is_some_and(|e| e == "mp4") && MatchInfo::path_for(p).exists())
         .collect();
     videos.sort();
     if videos.is_empty() {
@@ -165,7 +166,7 @@ fn ffmpeg_cut(video: &Path, start: f64, duration: f64, out: &Path) -> Result<()>
 }
 
 /// An ffmpeg command that won't flash a console window from the GUI app.
-fn ffmpeg() -> Result<Command> {
+pub(crate) fn ffmpeg() -> Result<Command> {
     use std::os::windows::process::CommandExt as _;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let exe = ffmpeg_exe().ok_or_else(|| anyhow!("找不到 ffmpeg,請先安裝: winget install Gyan.FFmpeg"))?;

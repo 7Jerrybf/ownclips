@@ -9,6 +9,8 @@
 // the command line or from the app's background thread.
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
@@ -19,7 +21,7 @@ use crate::clip;
 use crate::config::{self, RegionPct};
 use crate::gamestate::{self, GameEvent, LogWatcher};
 use crate::killfeed::{self, RowCounter};
-use crate::recorder::Recorder;
+use crate::recorder::{self, Recorder};
 
 /// Keep recording this long after the match is decided (final kill, the
 /// victory banner) before stopping.
@@ -77,6 +79,10 @@ impl MatchInfo {
 pub enum Notice {
     Started { video: PathBuf, map: String, mode: String },
     Event { kind: EventKind, t: f64 },
+    /// Recording stopped; the final file is being put together.
+    Processing { video: PathBuf },
+    /// A recording left unfinished by a crash was completed.
+    Recovered { video: PathBuf },
     Stopped { video: PathBuf, clips: usize },
     Skipped { reason: String },
     Error(String),
@@ -90,6 +96,7 @@ struct ActiveMatch {
     region: Option<RegionPct>,
     kills: RowCounter,
     deaths: RowCounter,
+    assists: RowCounter,
     last_generation: u64,
     stop_at: Option<Instant>,
     last_assist_sample: Option<Instant>,
@@ -98,11 +105,32 @@ struct ActiveMatch {
 pub struct AutoRecorder {
     log: LogWatcher,
     current: Option<ActiveMatch>,
+    /// Background work (muxing, clipping) reports back through here.
+    done_tx: Sender<Notice>,
+    done_rx: Receiver<Notice>,
+    jobs: Vec<JoinHandle<()>>,
 }
 
 impl AutoRecorder {
     pub fn new() -> Result<Self> {
-        Ok(Self { log: LogWatcher::new()?, current: None })
+        let (done_tx, done_rx) = mpsc::channel();
+        let mut auto = Self { log: LogWatcher::new()?, current: None, done_tx, done_rx, jobs: Vec::new() };
+        auto.recover();
+        Ok(auto)
+    }
+
+    /// Finishes recordings a crash left behind.
+    fn recover(&mut self) {
+        let Ok(dir) = config::load().and_then(|c| c.recordings_dir()) else { return };
+        let tx = self.done_tx.clone();
+        self.jobs.push(thread::spawn(move || {
+            for result in recorder::recover_unfinished(&dir) {
+                let _ = tx.send(match result {
+                    Ok(video) => Notice::Recovered { video },
+                    Err(e) => Notice::Error(format!("救回未完成的錄影失敗: {e:#}")),
+                });
+            }
+        }));
     }
 
     pub fn is_recording(&self) -> bool {
@@ -111,7 +139,8 @@ impl AutoRecorder {
 
     /// Advances the state machine; call a few times per second.
     pub fn tick(&mut self) -> Vec<Notice> {
-        let mut notices = Vec::new();
+        let mut notices: Vec<Notice> = self.done_rx.try_iter().collect();
+        self.jobs.retain(|j| !j.is_finished());
         for event in self.log.poll() {
             match event {
                 GameEvent::MatchStarted { map, mode } => {
@@ -171,6 +200,7 @@ impl AutoRecorder {
             region: cfg.killfeed_region,
             kills: RowCounter::default(),
             deaths: RowCounter::default(),
+            assists: RowCounter::default(),
             last_generation: 0,
             stop_at: None,
             last_assist_sample: None,
@@ -181,33 +211,47 @@ impl AutoRecorder {
     fn finish_match(&mut self) -> Vec<Notice> {
         let Some(mut m) = self.current.take() else { return Vec::new() };
         m.info.duration = m.recorder.elapsed();
-        let mut notices = Vec::new();
-        if let Err(e) = m.recorder.stop() {
-            notices.push(Notice::Error(format!("{e:#}")));
-            return notices;
-        }
+        let stopped = match m.recorder.stop() {
+            Ok(s) => s,
+            Err(e) => return vec![Notice::Error(format!("{e:#}"))],
+        };
         // A few seconds with nothing in it is a false start, not a match.
         if m.info.duration.is_none_or(|d| d < MIN_MATCH_SECONDS) && m.info.events.is_empty() {
-            let _ = fs::remove_file(&m.video);
+            stopped.discard();
             let _ = fs::remove_file(MatchInfo::path_for(&m.video));
-            notices.push(Notice::Skipped { reason: "錄影太短,已捨棄".to_string() });
-            return notices;
+            return vec![Notice::Skipped { reason: "錄影太短,已捨棄".to_string() }];
         }
         let _ = m.info.save(&m.video);
-        let clips = match config::load() {
-            Ok(cfg) if cfg.auto_clip => clip::clip_match(&m.video, &cfg).unwrap_or_else(|e| {
-                notices.push(Notice::Error(format!("自動裁切失敗: {e:#}")));
-                0
-            }),
-            _ => 0,
-        };
-        notices.push(Notice::Stopped { video: m.video, clips });
-        notices
+
+        // Muxing a long match takes a while; don't hold up the next one.
+        let tx = self.done_tx.clone();
+        let video = m.video.clone();
+        self.jobs.push(thread::spawn(move || {
+            if let Err(e) = stopped.finish() {
+                let _ = tx.send(Notice::Error(format!("{e:#}")));
+                return;
+            }
+            let clips = match config::load() {
+                Ok(cfg) if cfg.auto_clip => clip::clip_match(&video, &cfg).unwrap_or_else(|e| {
+                    let _ = tx.send(Notice::Error(format!("自動裁切失敗: {e:#}")));
+                    0
+                }),
+                _ => 0,
+            };
+            let _ = tx.send(Notice::Stopped { video, clips });
+        }));
+        vec![Notice::Processing { video: m.video }]
     }
 
-    /// Stops a recording in progress (e.g. the app is closing).
+    /// Stops a recording in progress and waits for background work (e.g.
+    /// the app is closing), so files are left complete.
     pub fn shutdown(&mut self) -> Vec<Notice> {
-        self.finish_match()
+        let mut notices = self.finish_match();
+        for j in self.jobs.drain(..) {
+            let _ = j.join();
+        }
+        notices.extend(self.done_rx.try_iter());
+        notices
     }
 }
 
@@ -230,6 +274,7 @@ fn detect(m: &mut ActiveMatch) -> Vec<Notice> {
     let found = [
         (EventKind::Kill, m.kills.update(scan.kills)),
         (EventKind::Death, m.deaths.update(scan.deaths)),
+        (EventKind::Assist, m.assists.update(scan.assists)),
     ];
     for (kind, n) in found {
         for _ in 0..n {
@@ -290,6 +335,8 @@ pub fn run() -> Result<()> {
                     println!("對局結束,錄影已存檔: {}(自動裁出 {clips} 個片段)", video.display());
                     println!("等待下一場...");
                 }
+                Notice::Processing { .. } => println!("對局結束,正在合成錄影檔..."),
+                Notice::Recovered { video } => println!("已救回未完成的錄影: {}", video.display()),
                 Notice::Skipped { reason } => println!("{reason}"),
                 Notice::Error(e) => eprintln!("錯誤: {e}"),
             }

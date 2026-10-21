@@ -37,12 +37,13 @@ fn record_test(secs: Option<&String>, name: Option<&String>, audio: Option<&Stri
         settings.audio = serde_json::from_value(serde_json::Value::String(a.clone()))
             .map_err(|_| anyhow::anyhow!("聲音模式只能是 game / system / game_and_mic / off"))?;
     }
-    let rec = recorder::Recorder::start(window, &path, settings)?;
+    let mut rec = recorder::Recorder::start(window, &path, settings)?;
     std::thread::sleep(std::time::Duration::from_secs(secs));
     if let Some(e) = rec.error() {
         println!("錄影中發生錯誤: {e}");
     }
-    let path = rec.stop()?;
+    println!("合成錄影檔...");
+    let path = rec.stop()?.finish()?;
     println!("完成: {}", path.display());
     Ok(())
 }
