@@ -3,7 +3,7 @@
 本機執行的 Valorant 精華片段工具，類似 Outplayed，但所有東西都留在你的電腦上，不上傳雲端，也不需要 OBS。
 
 - **自動錄影**：對局開始時自動開錄，結束後自動停止
-- **事件偵測**：從 killfeed 畫面判斷你的擊殺和死亡，標記在整場時間軸上
+- **事件偵測**：從 killfeed 畫面判斷你的擊殺、死亡和助攻，標記在整場時間軸上
 - **自動剪片段**：對局結束後裁出每次擊殺的片段，相近的擊殺會合併成多殺片段
 - **內建播放器**：在 app 裡看整場錄影，點時間軸上的標記直接跳到那一刻，也能自己選一段剪下來
 
@@ -11,9 +11,10 @@
 
 | 功能 | 做法 |
 |---|---|
-| 錄影 | Windows.Graphics.Capture 擷取 Valorant 視窗，Media Foundation 硬體編碼 H.264；聲音用 WASAPI 擷取 |
+| 錄影 | ffmpeg 的 gfxcapture（Windows.Graphics.Capture）以螢幕原生速度擷取 Valorant 視窗，重新取樣成穩定的 60fps，交給顯卡硬體編碼（NVENC；沒有 NVIDIA 顯卡時改用 AMF／QSV／x264）。錄影中先寫成 MKV，當機也不會壞檔 |
+| 聲音 | WASAPI 擷取，每個聲音封包依它的系統時間戳記放到正確位置（跟畫面擷取用同一個時鐘），對局結束後跟畫面對齊、合成 MP4，誤差約 ±10ms |
 | 對局開始／結束 | 讀 Valorant 自己寫的記錄檔 `%LOCALAPPDATA%\VALORANT\Saved\Logs\ShooterGame.log`，地圖和模式也從這裡取得 |
-| 擊殺／死亡 | 看 killfeed 畫面：Valorant 會在你自己的頭像外框一圈黃線。黃框在左邊是你擊殺，在右邊是你死亡 |
+| 擊殺／死亡／助攻 | 看 killfeed 畫面：Valorant 會在你自己的頭像外框一圈黃線。黃框在左邊是你擊殺，在右邊是你死亡；隊友擊殺那一行最左邊的助攻小頭像有黃框，就是你的助攻 |
 | 裁切片段 | ffmpeg 直接複製串流，不重新編碼，所以很快、畫質無損 |
 
 整個過程不讀寫遊戲記憶體、不注入程式，也不呼叫 Riot API。原理跟 OBS、Discord 的螢幕錄影一樣。
@@ -21,7 +22,7 @@
 ## 需求
 
 - Windows 10 2004 以上或 Windows 11（「只錄遊戲聲音」需要這個版本以上）
-- ffmpeg，裁切片段和產生縮圖要用到：
+- 含 gfxcapture 濾鏡的新版 ffmpeg（winget 上的 Gyan 版本就有），錄影、裁切片段和產生縮圖都要用到：
 
   ```
   winget install Gyan.FFmpeg
@@ -41,6 +42,13 @@ npx tauri build --no-bundle
 ```
 
 編譯好的程式在 `target\release\ownclips-app.exe`，也可以直接雙擊根目錄的 `OwnClips.bat`。
+
+打包成安裝檔（產生 `target\release\bundle\nsis\OwnClips_<版本>_x64-setup.exe`）：
+
+```
+cd app
+npx tauri build
+```
 
 開發模式（前端改了會即時更新）：
 
@@ -118,7 +126,8 @@ app/                 Tauri 桌面 app
 
 ## 已知限制
 
-- **還不會偵測助攻**：目前還沒有助攻在 killfeed 上長什麼樣子的樣本。打一般或競技模式時，疑似助攻的畫面會存到 `%APPDATA%\OwnClips\assist_samples\`，之後用這些樣本來實作。
-- **錄到一半當機的話，那支影片會打不開**：MP4 要正常收尾才能播放。正常關閉 app 或對局結束都會正確收尾。
-- **擊殺偵測以 1440p 調校**：其他解析度理論上可以用（座標都用相對比例），但還沒實測過。
-- **還沒做**：縮到系統匣常駐、開機自動啟動、安裝檔。
+- **對局結束後要等一下才看得到影片**：要先把畫面和聲音合成 MP4，36 分鐘的對局大約十幾秒到半分鐘。當機留下的錄影，下次開 app 時會自動合成救回。
+- **助攻偵測的樣本還很少**：目前只用一場競技的 3 次助攻驗證過。偵測不到的黃色畫面會存到 `%APPDATA%\OwnClips\assist_samples\` 供之後調整。
+- **偵測以 1440p 調校**：其他解析度理論上可以用（座標都用相對比例），但還沒實測過。
+- **安裝檔沒有數位簽章**：安裝時 Windows 會跳出 SmartScreen 警告。
+- **還沒做**：縮到系統匣常駐、開機自動啟動。
