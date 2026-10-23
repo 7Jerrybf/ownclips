@@ -13,6 +13,9 @@
 // the true start (by processing delay), so the minimum over the recording
 // is a tight estimate.
 //
+// Once frames flow, ffmpeg gets a high GPU scheduling priority so a game
+// saturating the GPU can't starve the capture (priority.rs).
+//
 // A separate low-rate capture (4 fps) of just the killfeed region feeds the
 // killfeed detector.
 use std::collections::VecDeque;
@@ -32,7 +35,7 @@ use crate::audio::{self, AudioMode, AudioRecorder};
 use crate::capture::{self, Control, SharedSink};
 use crate::clip;
 use crate::config::RegionPct;
-use crate::qpc;
+use crate::{priority, qpc};
 
 const DETECT_FRAME_INTERVAL: Duration = Duration::from_millis(250);
 /// How much later than the true first frame the progress-based estimate
@@ -131,8 +134,8 @@ impl Recorder {
         let video_start = Arc::new(Mutex::new(None));
         let log = Arc::new(Mutex::new(VecDeque::new()));
         let stderr = ffmpeg.stderr.take().unwrap();
-        let (vs, lg) = (video_start.clone(), log.clone());
-        thread::spawn(move || read_progress(stderr, &vs, &lg));
+        let (vs, lg, ffmpeg_pid) = (video_start.clone(), log.clone(), ffmpeg.id());
+        thread::spawn(move || read_progress(stderr, ffmpeg_pid, &vs, &lg));
 
         let (detect, sink) = match settings.detect_region {
             Some(region) => {
@@ -289,11 +292,24 @@ fn finish_files(files: &Files, meta: RecMeta) -> Result<PathBuf> {
     Ok(files.mp4.clone())
 }
 
-fn read_progress(stderr: std::process::ChildStderr, video_start: &Mutex<Option<u64>>, log: &Mutex<VecDeque<String>>) {
+fn read_progress(
+    stderr: std::process::ChildStderr,
+    ffmpeg_pid: u32,
+    video_start: &Mutex<Option<u64>>,
+    log: &Mutex<VecDeque<String>>,
+) {
+    let mut boosted = false;
     for line in BufReader::new(stderr).lines().map_while(Result::ok) {
         let now = qpc::now();
         if let Some(us) = line.strip_prefix("out_time_us=").and_then(|v| v.trim().parse::<i64>().ok()) {
             if us > 0 {
+                // Frames are flowing, so ffmpeg has its GPU device by now.
+                if !boosted {
+                    boosted = true;
+                    if !priority::boost(ffmpeg_pid) {
+                        log.lock().unwrap().push_back("無法提高錄影的 GPU 優先權".into());
+                    }
+                }
                 let estimate = now.saturating_sub(us as u64 * 10);
                 let mut vs = video_start.lock().unwrap();
                 *vs = Some(vs.map_or(estimate, |v| v.min(estimate)));

@@ -7,6 +7,7 @@ pub mod clip;
 pub mod config;
 pub mod gamestate;
 pub mod killfeed;
+pub mod priority;
 pub mod qpc;
 pub mod recorder;
 pub mod session;
