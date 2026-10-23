@@ -49,7 +49,10 @@ fn video_start_bias_ticks(fps: u32) -> i64 {
 #[derive(Clone, Copy)]
 pub struct RecordSettings {
     pub fps: u32,
+    /// H.264 bitrate (AV1 uses `quality`).
     pub bitrate_mbps: u32,
+    pub codec: VideoCodec,
+    pub quality: VideoQuality,
     pub audio: AudioMode,
     /// Window region the killfeed detector watches; None captures no
     /// detection frames.
@@ -104,7 +107,7 @@ impl Recorder {
     /// Starts recording `window`; the finished file will be `mp4`.
     pub fn start(window: Window, mp4: &Path, settings: RecordSettings) -> Result<Self> {
         let files = Files::for_output(mp4);
-        let encoder = pick_encoder()?;
+        let encoder = pick_encoder(settings.codec)?;
         let hwnd = window.as_raw_hwnd() as usize;
         let pid = window.process_id().map_err(|e| anyhow!("讀取遊戲程序 ID 失敗: {e}"))?;
 
@@ -123,7 +126,7 @@ impl Recorder {
         let mut cmd = clip::ffmpeg()?;
         cmd.args(["-hide_banner", "-loglevel", "warning", "-stats_period", "0.1", "-progress", "pipe:2"])
             .args(["-filter_complex", &filter, "-fps_mode", "passthrough"])
-            .args((encoder.args)(settings.fps, settings.bitrate_mbps))
+            .args((encoder.args)(&settings))
             .args(["-f", "matroska", "-y"])
             .arg(&files.mkv)
             .stdin(Stdio::piped())
@@ -324,14 +327,68 @@ fn read_progress(
     }
 }
 
+/// Video format of recordings.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoCodec {
+    /// About half the size of H.264 at the same quality (measured: 54% at
+    /// VMAF -0.7 on a 1440p60 Valorant clip). Needs an AV1 encoder (RTX 40+,
+    /// RX 7000+, Arc); falls back to H.264 otherwise.
+    #[default]
+    Av1,
+    /// Plays everywhere.
+    H264,
+}
+
+/// AV1 quality level (H.264 uses the bitrate setting instead).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoQuality {
+    High,
+    #[default]
+    Standard,
+    Small,
+}
+
+impl VideoQuality {
+    /// NVENC constant-quality value (lower is better).
+    fn cq(self) -> u32 {
+        match self {
+            Self::High => 30,
+            Self::Standard => 34,
+            Self::Small => 38,
+        }
+    }
+
+    /// Average bitrate for encoders without a constant-quality mode, and
+    /// the peak cap for those with one.
+    fn mbps(self) -> (u32, u32) {
+        match self {
+            Self::High => (14, 40),
+            Self::Standard => (10, 30),
+            Self::Small => (7, 20),
+        }
+    }
+}
+
 struct Encoder {
     name: &'static str,
+    codec: VideoCodec,
     /// Appended to the capture filter (e.g. download + colour conversion).
     filter: &'static str,
-    args: fn(u32, u32) -> Vec<String>,
+    args: fn(&RecordSettings) -> Vec<String>,
 }
 
 const SW_CONVERT: &str = ",hwdownload,format=bgra,scale=out_color_matrix=bt709:out_range=tv,format=nv12";
+/// NVENC takes the captured GPU frames directly and converts BGRA to
+/// limited-range BT.601 YUV itself (measured, same for H.264 and AV1), but
+/// would tag the stream as RGB: setparams (container tags) and the
+/// *_metadata bitstream filters label it correctly.
+const NVENC_TAGS: &str = ",setparams=range=tv:color_primaries=bt709:color_trc=bt709:colorspace=smpte170m";
+
+fn strings(a: &[&str]) -> Vec<String> {
+    a.iter().map(|s| s.to_string()).collect()
+}
 
 fn rate_args(fps: u32, mbps: u32) -> Vec<String> {
     vec![
@@ -347,88 +404,127 @@ fn rate_args(fps: u32, mbps: u32) -> Vec<String> {
 }
 
 fn bt709_tags() -> Vec<String> {
-    ["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709", "-color_range", "tv"]
-        .map(String::from)
-        .to_vec()
+    strings(&["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709", "-color_range", "tv"])
 }
 
-const ENCODERS: [Encoder; 4] = [
-    // NVENC takes the captured GPU frames directly and converts BGRA to
-    // limited-range BT.601 YUV itself (measured), but would tag the stream
-    // as RGB: setparams (container tags) and h264_metadata (bitstream tags)
-    // label it correctly.
+const ENCODERS: [Encoder; 7] = [
+    Encoder {
+        name: "av1_nvenc",
+        codec: VideoCodec::Av1,
+        filter: NVENC_TAGS,
+        args: |s| {
+            // Constant quality: static moments (buy phase) cost almost nothing.
+            let (_, peak) = s.quality.mbps();
+            let mut a = strings(&["-c:v", "av1_nvenc", "-preset", "p5", "-tune", "hq", "-rc", "vbr", "-delay", "0"]);
+            a.extend(["-cq".into(), s.quality.cq().to_string(), "-b:v".into(), "0".into()]);
+            a.extend(["-maxrate".into(), format!("{peak}M"), "-bufsize".into(), format!("{}M", peak * 4 / 3)]);
+            a.extend(["-g".into(), (s.fps * 2).to_string()]);
+            a.extend(strings(&[
+                "-bsf:v",
+                "av1_metadata=color_primaries=1:transfer_characteristics=1:matrix_coefficients=6:color_range=tv",
+            ]));
+            a
+        },
+    },
+    Encoder {
+        name: "av1_amf",
+        codec: VideoCodec::Av1,
+        filter: SW_CONVERT,
+        args: |s| {
+            let mut a = strings(&["-c:v", "av1_amf", "-quality", "balanced", "-rc", "vbr_peak"]);
+            a.extend(rate_args(s.fps, s.quality.mbps().0));
+            a.extend(bt709_tags());
+            a
+        },
+    },
+    Encoder {
+        name: "av1_qsv",
+        codec: VideoCodec::Av1,
+        filter: SW_CONVERT,
+        args: |s| {
+            let mut a = strings(&["-c:v", "av1_qsv", "-preset", "medium"]);
+            a.extend(rate_args(s.fps, s.quality.mbps().0));
+            a.extend(bt709_tags());
+            a
+        },
+    },
     Encoder {
         name: "h264_nvenc",
-        filter: ",setparams=range=tv:color_primaries=bt709:color_trc=bt709:colorspace=smpte170m",
-        args: |fps, mbps| {
+        codec: VideoCodec::H264,
+        filter: NVENC_TAGS,
+        args: |s| {
             // "-delay 0" hands each packet out as soon as it is encoded, so
             // the progress-based start estimate isn't skewed by buffering.
-            let mut a: Vec<String> = ["-c:v", "h264_nvenc", "-preset", "p5", "-tune", "hq", "-rc", "vbr", "-delay", "0"]
-                .map(String::from)
-                .to_vec();
-            a.extend(rate_args(fps, mbps));
-            a.extend(
-                [
-                    "-bsf:v",
-                    "h264_metadata=video_full_range_flag=0:colour_primaries=1:transfer_characteristics=1:matrix_coefficients=6",
-                ]
-                .map(String::from),
-            );
+            let mut a = strings(&["-c:v", "h264_nvenc", "-preset", "p5", "-tune", "hq", "-rc", "vbr", "-delay", "0"]);
+            a.extend(rate_args(s.fps, s.bitrate_mbps));
+            a.extend(strings(&[
+                "-bsf:v",
+                "h264_metadata=video_full_range_flag=0:colour_primaries=1:transfer_characteristics=1:matrix_coefficients=6",
+            ]));
             a
         },
     },
     Encoder {
         name: "h264_amf",
+        codec: VideoCodec::H264,
         filter: SW_CONVERT,
-        args: |fps, mbps| {
-            let mut a: Vec<String> = ["-c:v", "h264_amf", "-quality", "balanced", "-rc", "vbr_peak"].map(String::from).to_vec();
-            a.extend(rate_args(fps, mbps));
+        args: |s| {
+            let mut a = strings(&["-c:v", "h264_amf", "-quality", "balanced", "-rc", "vbr_peak"]);
+            a.extend(rate_args(s.fps, s.bitrate_mbps));
             a.extend(bt709_tags());
             a
         },
     },
     Encoder {
         name: "h264_qsv",
+        codec: VideoCodec::H264,
         filter: SW_CONVERT,
-        args: |fps, mbps| {
-            let mut a: Vec<String> = ["-c:v", "h264_qsv", "-preset", "medium"].map(String::from).to_vec();
-            a.extend(rate_args(fps, mbps));
+        args: |s| {
+            let mut a = strings(&["-c:v", "h264_qsv", "-preset", "medium"]);
+            a.extend(rate_args(s.fps, s.bitrate_mbps));
             a.extend(bt709_tags());
             a
         },
     },
     Encoder {
         name: "libx264",
+        codec: VideoCodec::H264,
         filter: SW_CONVERT,
-        args: |fps, mbps| {
-            let mut a: Vec<String> = ["-c:v", "libx264", "-preset", "veryfast"].map(String::from).to_vec();
-            a.extend(rate_args(fps, mbps));
+        args: |s| {
+            let mut a = strings(&["-c:v", "libx264", "-preset", "veryfast"]);
+            a.extend(rate_args(s.fps, s.bitrate_mbps));
             a.extend(bt709_tags());
             a
         },
     },
 ];
 
-/// The first encoder that actually works on this PC (an encoder can be
-/// compiled into ffmpeg without the matching GPU being present).
-fn pick_encoder() -> Result<&'static Encoder> {
-    static PICKED: OnceLock<Option<usize>> = OnceLock::new();
-    let idx = PICKED.get_or_init(|| {
+/// The first encoder of `codec` that actually works on this PC (an encoder
+/// can be compiled into ffmpeg without the matching GPU being present).
+/// Without a working AV1 encoder, recordings fall back to H.264.
+fn pick_encoder(codec: VideoCodec) -> Result<&'static Encoder> {
+    static PICKED: [OnceLock<Option<usize>>; 2] = [OnceLock::new(), OnceLock::new()];
+    let idx = PICKED[codec as usize].get_or_init(|| {
         ENCODERS.iter().position(|e| {
-            clip::ffmpeg().is_ok_and(|mut c| {
-                c.args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=s=640x360:d=0.2"])
-                    .args(["-frames:v", "3", "-pix_fmt", "nv12", "-c:v", e.name, "-f", "null", "-"])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status()
-                    .is_ok_and(|s| s.success())
-            })
+            e.codec == codec
+                && clip::ffmpeg().is_ok_and(|mut c| {
+                    c.args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=s=640x360:d=0.2"])
+                        .args(["-frames:v", "3", "-pix_fmt", "nv12", "-c:v", e.name, "-f", "null", "-"])
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status()
+                        .is_ok_and(|s| s.success())
+                })
         })
     });
-    idx.map(|i| &ENCODERS[i]).ok_or_else(|| anyhow!("找不到可用的影片編碼器(ffmpeg 是否已安裝?)"))
+    match *idx {
+        Some(i) => Ok(&ENCODERS[i]),
+        None if codec != VideoCodec::H264 => pick_encoder(VideoCodec::H264),
+        None => Err(anyhow!("找不到可用的影片編碼器(ffmpeg 是否已安裝?)")),
+    }
 }
 
-/// Which encoder recordings use, for display.
-pub fn encoder_name() -> Option<&'static str> {
-    pick_encoder().ok().map(|e| e.name)
+/// Which encoder recordings in `codec` use, for display.
+pub fn encoder_name(codec: VideoCodec) -> Option<&'static str> {
+    pick_encoder(codec).ok().map(|e| e.name)
 }

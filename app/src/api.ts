@@ -3,6 +3,8 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 
 export type EventKind = "kill" | "death" | "assist";
 export type AudioMode = "game" | "system" | "game_and_mic" | "off";
+export type VideoCodec = "av1" | "h264";
+export type VideoQuality = "high" | "standard" | "small";
 
 export interface MatchEvent {
   t: number;
@@ -39,6 +41,8 @@ export interface Config {
   clip_post_seconds: number;
   audio_mode: AudioMode;
   video_fps: number;
+  video_codec: VideoCodec;
+  video_quality: VideoQuality;
   video_bitrate_mbps: number;
   close_to_tray: boolean;
 }
@@ -72,7 +76,7 @@ export const api = {
   saveConfig: (cfg: Config) => invoke<void>("save_config", { cfg }),
   recordingsDir: () => invoke<string>("recordings_dir"),
   ffmpegAvailable: () => invoke<boolean>("ffmpeg_available"),
-  encoderName: () => invoke<string | null>("encoder_name"),
+  encoderName: (codec: VideoCodec) => invoke<string | null>("encoder_name", { codec }),
   listMatches: () => invoke<MatchSummary[]>("list_matches"),
   deleteMatch: (video: string) => invoke<void>("delete_match", { video }),
   reveal: (path: string) => invoke<void>("reveal", { path }),

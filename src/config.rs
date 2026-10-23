@@ -5,7 +5,7 @@ use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::audio::AudioMode;
-use crate::recorder::RecordSettings;
+use crate::recorder::{RecordSettings, VideoCodec, VideoQuality};
 
 /// A screen region expressed as fractions (0.0..1.0) of the captured
 /// window's client width/height, so it stays correct no matter what
@@ -31,6 +31,9 @@ pub struct Config {
     /// Built-in recorder settings.
     pub audio_mode: AudioMode,
     pub video_fps: u32,
+    pub video_codec: VideoCodec,
+    pub video_quality: VideoQuality,
+    /// H.264 only; AV1 uses `video_quality`.
     pub video_bitrate_mbps: u32,
     /// Closing the window hides it to the tray and keeps recording.
     pub close_to_tray: bool,
@@ -49,6 +52,8 @@ impl Default for Config {
             clip_post_seconds: 3.0,
             audio_mode: AudioMode::Game,
             video_fps: 60,
+            video_codec: VideoCodec::Av1,
+            video_quality: VideoQuality::Standard,
             video_bitrate_mbps: 20,
             close_to_tray: true,
         }
@@ -71,6 +76,8 @@ impl Config {
         RecordSettings {
             fps: self.video_fps,
             bitrate_mbps: self.video_bitrate_mbps,
+            codec: self.video_codec,
+            quality: self.video_quality,
             audio: self.audio_mode,
             detect_region: self.killfeed_region.map(detect_region),
         }

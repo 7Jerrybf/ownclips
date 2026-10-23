@@ -1,10 +1,21 @@
 // Settings, saved automatically as they change.
 import { open } from "@tauri-apps/plugin-dialog";
 import { useEffect, useRef, useState } from "react";
-import type { AudioMode, Config } from "../api";
+import type { AudioMode, Config, VideoCodec, VideoQuality } from "../api";
 import { api } from "../api";
 import { Calibration } from "./Calibration";
 import { IconFolder } from "./Icons";
+
+const CODECS: { codec: VideoCodec; label: string; desc: string }[] = [
+  { codec: "av1", label: "AV1", desc: "檔案大約只有 H.264 的一半,畫質幾乎一樣(建議)" },
+  { codec: "h264", label: "H.264", desc: "所有裝置和播放器都能播,檔案較大" },
+];
+
+const QUALITIES: { quality: VideoQuality; label: string }[] = [
+  { quality: "high", label: "高" },
+  { quality: "standard", label: "標準" },
+  { quality: "small", label: "省空間" },
+];
 
 const AUDIO: { mode: AudioMode; title: string; desc: string }[] = [
   { mode: "game", title: "只錄遊戲聲音", desc: "只抓 Valorant 的聲音,Discord、音樂不會錄進去(建議)" },
@@ -29,11 +40,27 @@ export function SettingsView({
   const first = useRef(true);
 
   useEffect(() => {
-    api.getConfig().then(setCfg).catch((e) => notify(String(e), "error"));
+    api
+      .getConfig()
+      .then(setCfg)
+      .catch((e) => notify(String(e), "error"));
     api.ffmpegAvailable().then(setFfmpeg);
-    api.encoderName().then(setEncoder).catch(() => {});
-    api.getAutostart().then(setAutostart).catch(() => {});
+    api
+      .getAutostart()
+      .then(setAutostart)
+      .catch(() => {});
   }, [notify]);
+
+  // Which encoder the chosen format ends up using (AV1 falls back to H.264
+  // on cards without an AV1 encoder).
+  useEffect(() => {
+    if (!cfg) return;
+    setEncoder(null);
+    api
+      .encoderName(cfg.video_codec)
+      .then(setEncoder)
+      .catch(() => {});
+  }, [cfg?.video_codec]);
 
   useEffect(() => {
     api.recordingsDir().then(setDir);
@@ -61,6 +88,9 @@ export function SettingsView({
 
   if (!cfg) return <div className="page" />;
   const set = <K extends keyof Config>(k: K, v: Config[K]) => setCfg({ ...cfg, [k]: v });
+  const fallback = cfg.video_codec === "av1" && !!encoder && !encoder.startsWith("av1");
+  // Until the encoder is known, show the controls for the chosen format.
+  const av1 = cfg.video_codec === "av1" && !fallback;
 
   async function toggleAutostart() {
     const next = !autostart;
@@ -82,7 +112,9 @@ export function SettingsView({
       <div className="page-head">
         <div>
           <h1 className="page-title">設定</h1>
-          <div className="page-sub">變更會自動儲存{saved && <span style={{ color: "var(--kill)" }}> · 已儲存</span>}</div>
+          <div className="page-sub">
+            變更會自動儲存{saved && <span style={{ color: "var(--kill)" }}> · 已儲存</span>}
+          </div>
         </div>
       </div>
 
@@ -103,13 +135,32 @@ export function SettingsView({
           </div>
           <div className="field">
             <div className="field-label">
+              <b>影片格式</b>
+              <span>{CODECS.find((c) => c.codec === cfg.video_codec)?.desc}</span>
+            </div>
+            <div className="segmented">
+              {CODECS.map((c) => (
+                <button
+                  key={c.codec}
+                  className={cfg.video_codec === c.codec ? "on" : ""}
+                  onClick={() => set("video_codec", c.codec)}
+                >
+                  {c.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="field">
+            <div className="field-label">
               <b>影片編碼器</b>
               <span>
-                {encoder === "h264_nvenc"
-                  ? "NVIDIA 顯示卡硬體編碼,幾乎不影響遊戲效能"
-                  : encoder
-                    ? "自動選擇的編碼器"
-                    : "偵測中…(需要 ffmpeg)"}
+                {fallback
+                  ? "這張顯示卡不支援 AV1 硬體編碼,會改用 H.264 錄影"
+                  : encoder?.endsWith("_nvenc")
+                    ? "NVIDIA 顯示卡硬體編碼,幾乎不影響遊戲效能"
+                    : encoder
+                      ? "自動選擇的編碼器"
+                      : "偵測中…(需要 ffmpeg)"}
               </span>
             </div>
             <span className="chip">{encoder ?? "—"}</span>
@@ -127,23 +178,43 @@ export function SettingsView({
               ))}
             </div>
           </div>
-          <div className="field">
-            <div className="field-label">
-              <b>畫質(位元率)</b>
-              <span>越高越清楚,檔案也越大。1440p 建議 20 Mbps 以上</span>
+          {av1 ? (
+            <div className="field">
+              <div className="field-label">
+                <b>畫質</b>
+                <span>標準:清晰度和 H.264 20 Mbps 差不多。省空間:檔案再小約三成,細節稍微少一點</span>
+              </div>
+              <div className="segmented">
+                {QUALITIES.map((q) => (
+                  <button
+                    key={q.quality}
+                    className={cfg.video_quality === q.quality ? "on" : ""}
+                    onClick={() => set("video_quality", q.quality)}
+                  >
+                    {q.label}
+                  </button>
+                ))}
+              </div>
             </div>
-            <div className="range-wrap">
-              <input
-                type="range"
-                min={6}
-                max={60}
-                step={2}
-                value={cfg.video_bitrate_mbps}
-                onChange={(e) => set("video_bitrate_mbps", Number(e.target.value))}
-              />
-              <span className="val num">{cfg.video_bitrate_mbps} Mbps</span>
+          ) : (
+            <div className="field">
+              <div className="field-label">
+                <b>畫質(位元率)</b>
+                <span>越高越清楚,檔案也越大。1440p 建議 20 Mbps 以上</span>
+              </div>
+              <div className="range-wrap">
+                <input
+                  type="range"
+                  min={6}
+                  max={60}
+                  step={2}
+                  value={cfg.video_bitrate_mbps}
+                  onChange={(e) => set("video_bitrate_mbps", Number(e.target.value))}
+                />
+                <span className="val num">{cfg.video_bitrate_mbps} Mbps</span>
+              </div>
             </div>
-          </div>
+          )}
           <div className="field">
             <div className="field-label">
               <b>錄影位置</b>

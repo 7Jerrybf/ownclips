@@ -333,8 +333,8 @@ fn is_mkv(p: &Path) -> bool {
 
 /// The first call probes the encoders with ffmpeg, so keep it off the UI thread.
 #[tauri::command]
-async fn encoder_name() -> Option<String> {
-    tauri::async_runtime::spawn_blocking(|| ownclips::recorder::encoder_name().map(String::from))
+async fn encoder_name(codec: ownclips::recorder::VideoCodec) -> Option<String> {
+    tauri::async_runtime::spawn_blocking(move || ownclips::recorder::encoder_name(codec).map(String::from))
         .await
         .ok()
         .flatten()
