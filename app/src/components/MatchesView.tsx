@@ -3,7 +3,7 @@ import type { MatchSummary } from "../api";
 import { api } from "../api";
 import { clock, count, type DateRange, inRange, size, timeOf } from "../format";
 import { DayGroups, RangeFilter } from "./DayGroups";
-import { IconFolder, IconMatches, IconRefresh, IconTrash } from "./Icons";
+import { IconFolder, IconKeep, IconMatches, IconRefresh, IconTrash } from "./Icons";
 import { VideoThumb } from "./VideoThumb";
 
 export function MatchesView({
@@ -22,6 +22,14 @@ export function MatchesView({
   const [range, setRange] = useState<DateRange>("all");
   const shown = matches.filter((m) => inRange(m.info.started_at, range));
   const totalKills = matches.reduce((n, m) => n + count(m.info.events, "kill"), 0);
+
+  async function toggleKeep(m: MatchSummary) {
+    try {
+      await api.setKeep(m.video, !m.info.keep);
+    } catch (e) {
+      notify(String(e), "error");
+    }
+  }
 
   async function remove(m: MatchSummary) {
     try {
@@ -92,6 +100,7 @@ export function MatchesView({
                   <div className="badge-tl">
                     {m.recording && <span className="chip rec">● 錄影 / 處理中</span>}
                     <span className="chip">{m.info.mode}</span>
+                    {m.info.keep && <span className="chip keep">已保留</span>}
                   </div>
                   <div className="corner">
                     <span className="map-name">{m.info.map}</span>
@@ -134,6 +143,14 @@ export function MatchesView({
                         </>
                       ) : (
                         <>
+                          <button
+                            className={`btn sm ghost ${m.info.keep ? "keep-on" : ""}`}
+                            title={m.info.keep ? "取消保留" : "保留這場:超過容量上限時不會被自動刪除"}
+                            disabled={m.recording}
+                            onClick={() => toggleKeep(m)}
+                          >
+                            <IconKeep size={15} filled={m.info.keep} />
+                          </button>
                           <button className="btn sm ghost" title="在檔案總管顯示" onClick={() => api.reveal(m.video)}>
                             <IconFolder size={15} />
                           </button>

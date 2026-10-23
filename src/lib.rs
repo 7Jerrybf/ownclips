@@ -11,3 +11,4 @@ pub mod priority;
 pub mod qpc;
 pub mod recorder;
 pub mod session;
+pub mod storage;

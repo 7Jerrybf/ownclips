@@ -1,9 +1,10 @@
 // Settings, saved automatically as they change.
 import { open } from "@tauri-apps/plugin-dialog";
-import { useEffect, useRef, useState } from "react";
-import type { AudioMode, Config, VideoCodec, VideoQuality } from "../api";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { AudioMode, Config, StorageUsage, VideoCodec, VideoQuality } from "../api";
 import { api } from "../api";
 import { Calibration } from "./Calibration";
+import { size } from "../format";
 import { IconFolder } from "./Icons";
 
 const CODECS: { codec: VideoCodec; label: string; desc: string }[] = [
@@ -36,6 +37,8 @@ export function SettingsView({
   const [ffmpeg, setFfmpeg] = useState<boolean | null>(null);
   const [encoder, setEncoder] = useState<string | null>(null);
   const [autostart, setAutostart] = useState<boolean | null>(null);
+  const [usage, setUsage] = useState<StorageUsage | null>(null);
+  const [confirmClean, setConfirmClean] = useState(false);
   const [saved, setSaved] = useState(false);
   const first = useRef(true);
 
@@ -61,6 +64,19 @@ export function SettingsView({
       .then(setEncoder)
       .catch(() => {});
   }, [cfg?.video_codec]);
+
+  // Folder usage, and what the limit being set would delete.
+  const limitGb = cfg?.storage_limit_gb ?? null;
+  const refreshUsage = useCallback(() => {
+    api
+      .storageUsage(limitGb)
+      .then(setUsage)
+      .catch(() => {});
+  }, [limitGb]);
+  useEffect(() => {
+    setConfirmClean(false);
+    refreshUsage();
+  }, [refreshUsage, dir]);
 
   useEffect(() => {
     api.recordingsDir().then(setDir);
@@ -100,6 +116,19 @@ export function SettingsView({
     } catch (e) {
       notify(String(e), "error");
     }
+  }
+
+  async function cleanNow() {
+    if (!cfg) return;
+    try {
+      await api.saveConfig(cfg); // the cleanup reads the saved limit
+      const n = await api.cleanStorage();
+      notify(`已刪除最舊的 ${n} 場錄影`, "success");
+    } catch (e) {
+      notify(String(e), "error");
+    }
+    setConfirmClean(false);
+    refreshUsage();
   }
 
   async function pickDir() {
@@ -232,6 +261,66 @@ export function SettingsView({
               </button>
             </div>
           </div>
+        </div>
+
+        <div className="section-title">儲存空間</div>
+        <div className="section">
+          <div className="field">
+            <div className="field-label">
+              <b>容量上限</b>
+              <span>
+                {usage ? `目前錄影共 ${size(usage.used)}` : "計算中…"}
+                {cfg.storage_limit_gb === null
+                  ? "。開啟後,超過上限會自動刪除最舊的錄影"
+                  : `,超過 ${cfg.storage_limit_gb} GB 時自動刪除最舊的錄影(已保留的對局和匯出的片段不會刪)`}
+              </span>
+            </div>
+            <div className="field-control">
+              {cfg.storage_limit_gb !== null && (
+                <div className="range-wrap">
+                  <input
+                    type="range"
+                    min={20}
+                    max={2000}
+                    step={10}
+                    value={cfg.storage_limit_gb}
+                    onChange={(e) => set("storage_limit_gb", Number(e.target.value))}
+                  />
+                  <span className="val num">{cfg.storage_limit_gb} GB</span>
+                </div>
+              )}
+              <button
+                className={`switch ${cfg.storage_limit_gb !== null ? "on" : ""}`}
+                aria-pressed={cfg.storage_limit_gb !== null}
+                onClick={() => set("storage_limit_gb", cfg.storage_limit_gb === null ? 100 : null)}
+              />
+            </div>
+          </div>
+          {usage && usage.delete_count > 0 && (
+            <div className="field">
+              <div className="field-label">
+                <b className="warn">超過上限</b>
+                <span>
+                  下一場對局存好後(或下次開啟 OwnClips 時)會永久刪除最舊的 {usage.delete_count} 場錄影,釋放{" "}
+                  {size(usage.delete_bytes)}。想留下的對局請先按「保留」。
+                </span>
+              </div>
+              {confirmClean ? (
+                <div className="field-control">
+                  <button className="btn danger" onClick={cleanNow}>
+                    確定刪除 {usage.delete_count} 場
+                  </button>
+                  <button className="btn ghost" onClick={() => setConfirmClean(false)}>
+                    取消
+                  </button>
+                </div>
+              ) : (
+                <button className="btn" onClick={() => setConfirmClean(true)}>
+                  立即清理
+                </button>
+              )}
+            </div>
+          )}
         </div>
 
         <div className="section-title">背景執行</div>

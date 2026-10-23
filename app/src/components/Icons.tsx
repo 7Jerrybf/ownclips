@@ -98,6 +98,12 @@ export const IconRec = (p: P) => (
     <circle cx="12" cy="12" r="6" fill="currentColor" />
   </Svg>
 );
+/** Bookmark; filled when the match is kept. */
+export const IconKeep = ({ filled, ...p }: P & { filled?: boolean }) => (
+  <Svg {...p}>
+    <path d="M6 3h12v18l-6-4.5L6 21z" fill={filled ? "currentColor" : "none"} />
+  </Svg>
+);
 export const IconCrop = (p: P) => (
   <Svg {...p}>
     <path d="M6 2v14a2 2 0 0 0 2 2h14M18 22V8a2 2 0 0 0-2-2H2" />

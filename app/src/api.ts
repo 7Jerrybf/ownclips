@@ -17,6 +17,7 @@ export interface MatchInfo {
   started_at: string;
   duration: number | null;
   events: MatchEvent[];
+  keep?: boolean;
 }
 
 export interface MatchSummary {
@@ -45,6 +46,7 @@ export interface Config {
   video_quality: VideoQuality;
   video_bitrate_mbps: number;
   close_to_tray: boolean;
+  storage_limit_gb: number | null;
 }
 
 export interface RecorderStatus {
@@ -57,6 +59,12 @@ export interface RecorderStatus {
   deaths: number;
   assists: number;
   last_error: string | null;
+}
+
+export interface StorageUsage {
+  used: number;
+  delete_count: number;
+  delete_bytes: number;
 }
 
 export interface GameFrame {
@@ -83,6 +91,9 @@ export const api = {
   openPath: (path: string) => invoke<void>("open_path", { path }),
   cutRange: (video: string, start: number, end: number) => invoke<string>("cut_range", { video, start, end }),
   reanalyze: (video: string) => invoke<void>("reanalyze_match", { video }),
+  storageUsage: (limitGb: number | null) => invoke<StorageUsage>("storage_usage", { limitGb }),
+  cleanStorage: () => invoke<number>("clean_storage"),
+  setKeep: (video: string, keep: boolean) => invoke<void>("set_keep", { video, keep }),
   grabGameFrame: () => invoke<GameFrame>("grab_game_frame"),
   saveRegion: (region: RegionPct) => invoke<void>("save_region", { region }),
   getAutostart: () => invoke<boolean>("get_autostart"),

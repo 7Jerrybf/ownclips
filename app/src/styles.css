@@ -331,6 +331,15 @@ button {
   background: var(--accent);
   color: white;
 }
+/* Kept matches: a gold bookmark, and a chip readable over thumbnails. */
+.btn.keep-on,
+.btn.keep-on:hover {
+  color: var(--gold);
+}
+.chip.keep {
+  background: rgba(10, 12, 16, 0.78);
+  color: var(--gold);
+}
 
 /* ---------- cards grid ---------- */
 

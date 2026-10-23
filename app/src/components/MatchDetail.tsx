@@ -7,7 +7,18 @@ import type { EventKind, MatchSummary } from "../api";
 import { api, fileUrl } from "../api";
 import { clock, count, kindLabel, shortDate } from "../format";
 import { type Highlight, highlights, killLabel } from "../highlights";
-import { IconAssist, IconBack, IconDeath, IconFolder, IconKill, IconNext, IconPlay, IconPrev, IconScissors } from "./Icons";
+import {
+  IconAssist,
+  IconBack,
+  IconDeath,
+  IconFolder,
+  IconKeep,
+  IconKill,
+  IconNext,
+  IconPlay,
+  IconPrev,
+  IconScissors,
+} from "./Icons";
 import { Timeline } from "./Timeline";
 
 const LEAD_IN = 3;
@@ -163,13 +174,24 @@ export function MatchDetail({
       <div className="page-head">
         <div>
           <h1 className="page-title">
-            {match.info.map} <span className="chip" style={{ verticalAlign: 4 }}>{match.info.mode}</span>
+            {match.info.map}{" "}
+            <span className="chip" style={{ verticalAlign: 4 }}>
+              {match.info.mode}
+            </span>
           </h1>
           <div className="page-sub">
             {shortDate(match.info.started_at)} · {clock(duration)}
           </div>
         </div>
         <div className="page-actions">
+          <button
+            className={`btn ${match.info.keep ? "keep-on" : ""}`}
+            disabled={match.recording}
+            onClick={() => api.setKeep(match.video, !match.info.keep).catch((e) => notify(String(e), "error"))}
+            title="保留的對局超過容量上限時不會被自動刪除"
+          >
+            <IconKeep size={16} filled={match.info.keep} /> {match.info.keep ? "已保留" : "保留這場"}
+          </button>
           <button
             className="btn"
             disabled={reanalyzing !== null || match.recording}
@@ -246,11 +268,7 @@ export function MatchDetail({
               <button className="btn sm" onClick={() => setRange([current, null])} title="設為起點 ( I )">
                 設為起點 {rin !== null && <span className="num">{clock(rin)}</span>}
               </button>
-              <button
-                className="btn sm"
-                onClick={() => setRange(([s]) => [s ?? 0, current])}
-                title="設為終點 ( O )"
-              >
+              <button className="btn sm" onClick={() => setRange(([s]) => [s ?? 0, current])} title="設為終點 ( O )">
                 設為終點 {rout !== null && <span className="num">{clock(rout)}</span>}
               </button>
               <button

@@ -126,6 +126,11 @@ fn apply_notice(app: &AppHandle, status: &Mutex<RecorderStatus>, notice: Notice)
                 let _ = app.emit("library-changed", ());
                 Some(Toast { kind: "stop".into(), message: "錄影已存檔,精華區間已標好".into() })
             }
+            Notice::Cleaned { deleted, freed } => {
+                let _ = app.emit("library-changed", ());
+                let gb = freed as f64 / ownclips::storage::GB as f64;
+                Some(Toast { kind: "info".into(), message: format!("超過容量上限,已刪除最舊的 {deleted} 場錄影({gb:.1} GB)") })
+            }
             Notice::Skipped { reason } => Some(Toast { kind: "info".into(), message: reason }),
             Notice::Error(e) => {
                 s.last_error = Some(e.clone());
@@ -396,6 +401,48 @@ async fn reanalyze_match(app: AppHandle, video: String) -> CmdResult<()> {
     .map_err(err)?
 }
 
+// ---------- storage limit ----------
+
+#[derive(Serialize)]
+struct StorageUsage {
+    /// Bytes used by finished recordings.
+    used: u64,
+    /// What applying `limit_gb` would delete.
+    delete_count: usize,
+    delete_bytes: u64,
+}
+
+/// Recordings folder usage, and what a limit of `limit_gb` would delete.
+#[tauri::command]
+async fn storage_usage(limit_gb: Option<u32>) -> CmdResult<StorageUsage> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let dir = config::load().map_err(err)?.recordings_dir().map_err(err)?;
+        let plan = ownclips::storage::plan(&dir, limit_gb.map(|gb| gb as u64 * ownclips::storage::GB));
+        Ok(StorageUsage { used: plan.used, delete_count: plan.delete.len(), delete_bytes: plan.freed() })
+    })
+    .await
+    .map_err(err)?
+}
+
+/// Applies the saved size limit now; returns how many recordings it deleted.
+#[tauri::command]
+async fn clean_storage(app: AppHandle) -> CmdResult<usize> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let (deleted, _) = ownclips::storage::enforce().map_err(|e| format!("{e:#}"))?;
+        let _ = app.emit("library-changed", ());
+        Ok(deleted)
+    })
+    .await
+    .map_err(err)?
+}
+
+#[tauri::command]
+fn set_keep(app: AppHandle, video: String, keep: bool) -> CmdResult<()> {
+    ownclips::storage::set_keep(Path::new(&video), keep).map_err(|e| format!("{e:#}"))?;
+    let _ = app.emit("library-changed", ());
+    Ok(())
+}
+
 // ---------- killfeed calibration ----------
 
 #[derive(Serialize)]
@@ -493,6 +540,9 @@ fn main() {
             open_path,
             cut_range,
             reanalyze_match,
+            storage_usage,
+            clean_storage,
+            set_keep,
             grab_game_frame,
             save_region,
             get_autostart,

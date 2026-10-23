@@ -26,6 +26,7 @@ use crate::config;
 use crate::gamestate::{self, GameEvent, LogWatcher};
 use crate::killfeed::{self, RowCounter};
 use crate::recorder::{self, Recorder};
+use crate::storage;
 
 /// Keep recording this long after the match is decided (final kill, the
 /// victory banner) before stopping.
@@ -58,6 +59,9 @@ pub struct MatchInfo {
     /// Recording length in seconds, once finished.
     pub duration: Option<f64>,
     pub events: Vec<MatchEvent>,
+    /// Never deleted by the recordings size limit.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keep: bool,
 }
 
 impl MatchInfo {
@@ -69,7 +73,7 @@ impl MatchInfo {
         serde_json::from_str(&fs::read_to_string(Self::path_for(video)).ok()?).ok()
     }
 
-    fn save(&self, video: &Path) -> Result<()> {
+    pub(crate) fn save(&self, video: &Path) -> Result<()> {
         fs::write(Self::path_for(video), serde_json::to_string_pretty(self)?)?;
         Ok(())
     }
@@ -85,6 +89,8 @@ pub enum Notice {
     /// A recording left unfinished by a crash was completed.
     Recovered { video: PathBuf },
     Stopped { video: PathBuf },
+    /// The recordings size limit deleted the oldest recordings.
+    Cleaned { deleted: usize, freed: u64 },
     Skipped { reason: String },
     Error(String),
 }
@@ -128,6 +134,7 @@ impl AutoRecorder {
                     Err(e) => Notice::Error(format!("救回未完成的錄影失敗: {e:#}")),
                 });
             }
+            send_cleanup(&tx);
         }));
     }
 
@@ -189,6 +196,7 @@ impl AutoRecorder {
             started_at: now.format("%Y-%m-%d %H:%M:%S").to_string(),
             duration: None,
             events: Vec::new(),
+            keep: false,
         };
         info.save(&video)?;
         self.current = Some(ActiveMatch {
@@ -227,6 +235,7 @@ impl AutoRecorder {
                 Ok(_) => Notice::Stopped { video },
                 Err(e) => Notice::Error(format!("{e:#}")),
             });
+            send_cleanup(&tx);
         }));
         vec![Notice::Processing { video: m.video }]
     }
@@ -240,6 +249,19 @@ impl AutoRecorder {
         }
         notices.extend(self.done_rx.try_iter());
         notices
+    }
+}
+
+/// Applies the recordings size limit, reporting what it deleted.
+fn send_cleanup(tx: &Sender<Notice>) {
+    match storage::enforce() {
+        Ok((0, _)) => {}
+        Ok((deleted, freed)) => {
+            let _ = tx.send(Notice::Cleaned { deleted, freed });
+        }
+        Err(e) => {
+            let _ = tx.send(Notice::Error(format!("清理舊錄影失敗: {e:#}")));
+        }
     }
 }
 
@@ -415,6 +437,9 @@ pub fn run() -> Result<()> {
                 }
                 Notice::Processing { .. } => println!("對局結束,正在合成錄影檔..."),
                 Notice::Recovered { video } => println!("已救回未完成的錄影: {}", video.display()),
+                Notice::Cleaned { deleted, freed } => {
+                    println!("超過容量上限,已刪除最舊的 {deleted} 場錄影({:.1} GB)", freed as f64 / storage::GB as f64)
+                }
                 Notice::Skipped { reason } => println!("{reason}"),
                 Notice::Error(e) => eprintln!("錯誤: {e}"),
             }

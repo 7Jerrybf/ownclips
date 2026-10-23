@@ -37,6 +37,8 @@ pub struct Config {
     pub video_bitrate_mbps: u32,
     /// Closing the window hides it to the tray and keeps recording.
     pub close_to_tray: bool,
+    /// Size limit of the recordings folder in GB; None keeps everything.
+    pub storage_limit_gb: Option<u32>,
 }
 
 /// Where the killfeed sits with Valorant's default HUD on a 16:9 screen
@@ -56,6 +58,7 @@ impl Default for Config {
             video_quality: VideoQuality::Standard,
             video_bitrate_mbps: 20,
             close_to_tray: true,
+            storage_limit_gb: None,
         }
     }
 }
@@ -70,6 +73,11 @@ impl Config {
                 Ok(PathBuf::from(home).join("Videos").join("OwnClips"))
             }
         }
+    }
+
+    /// The recordings size limit in bytes, if one is set.
+    pub fn storage_limit(&self) -> Option<u64> {
+        self.storage_limit_gb.map(|gb| gb as u64 * crate::storage::GB)
     }
 
     pub fn record_settings(&self) -> RecordSettings {
