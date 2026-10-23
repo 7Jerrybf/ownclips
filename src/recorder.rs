@@ -13,7 +13,8 @@
 // the true start (by processing delay), so the minimum over the recording
 // is a tight estimate.
 //
-// A separate low-rate capture (4 fps) feeds the killfeed detector.
+// A separate low-rate capture (4 fps) of just the killfeed region feeds the
+// killfeed detector.
 use std::collections::VecDeque;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
@@ -30,6 +31,7 @@ use windows_capture::window::Window;
 use crate::audio::{self, AudioMode, AudioRecorder};
 use crate::capture::{self, Control, SharedSink};
 use crate::clip;
+use crate::config::RegionPct;
 use crate::qpc;
 
 const DETECT_FRAME_INTERVAL: Duration = Duration::from_millis(250);
@@ -46,6 +48,9 @@ pub struct RecordSettings {
     pub fps: u32,
     pub bitrate_mbps: u32,
     pub audio: AudioMode,
+    /// Window region the killfeed detector watches; None captures no
+    /// detection frames.
+    pub detect_region: Option<RegionPct>,
 }
 
 /// Files of one recording. While recording: `<stem>.mkv` (video),
@@ -129,8 +134,14 @@ impl Recorder {
         let (vs, lg) = (video_start.clone(), log.clone());
         thread::spawn(move || read_progress(stderr, &vs, &lg));
 
-        let detect_window = Window::from_raw_hwnd(hwnd as *mut std::ffi::c_void);
-        let (detect, sink) = capture::start_capture_every(detect_window, Some(DETECT_FRAME_INTERVAL))?;
+        let (detect, sink) = match settings.detect_region {
+            Some(region) => {
+                let detect_window = Window::from_raw_hwnd(hwnd as *mut std::ffi::c_void);
+                let (c, s) = capture::start_capture_every(detect_window, Some(DETECT_FRAME_INTERVAL), Some(region))?;
+                (Some(c), s)
+            }
+            None => (None, SharedSink::default()),
+        };
 
         Ok(Self {
             files,
@@ -140,13 +151,13 @@ impl Recorder {
             audio_start,
             video_start,
             fps: settings.fps,
-            detect: Some(detect),
+            detect,
             sink,
             log,
         })
     }
 
-    /// Latest frames for the detector.
+    /// Latest frames for the detector: the `detect_region` of the window.
     pub fn frames(&self) -> SharedSink {
         self.sink.clone()
     }

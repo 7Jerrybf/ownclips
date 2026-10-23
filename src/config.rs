@@ -68,8 +68,25 @@ impl Config {
     }
 
     pub fn record_settings(&self) -> RecordSettings {
-        RecordSettings { fps: self.video_fps, bitrate_mbps: self.video_bitrate_mbps, audio: self.audio_mode }
+        RecordSettings {
+            fps: self.video_fps,
+            bitrate_mbps: self.video_bitrate_mbps,
+            audio: self.audio_mode,
+            detect_region: self.killfeed_region.map(detect_region),
+        }
     }
+}
+
+/// Killfeed rows are right-aligned and grow to the left with long names and
+/// assist icons, so the detector watches at least this much of the window's
+/// width left of the calibrated region's right edge.
+pub const MIN_DETECT_WIDTH: f32 = 0.40;
+
+/// The region the detector actually watches for a calibrated `region`.
+pub fn detect_region(region: RegionPct) -> RegionPct {
+    let right = (region.x + region.w).min(1.0);
+    let x = region.x.min(right - MIN_DETECT_WIDTH).max(0.0);
+    RegionPct { x, w: right - x, ..region }
 }
 
 fn config_dir() -> Result<PathBuf> {

@@ -18,7 +18,7 @@ use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::capture;
-use crate::config::{self, RegionPct};
+use crate::config;
 use crate::gamestate::{self, GameEvent, LogWatcher};
 use crate::killfeed::{self, RowCounter};
 use crate::recorder::{self, Recorder};
@@ -26,9 +26,6 @@ use crate::recorder::{self, Recorder};
 /// Keep recording this long after the match is decided (final kill, the
 /// victory banner) before stopping.
 const END_TAIL: Duration = Duration::from_secs(6);
-/// Min gap between saved "maybe an assist" frames.
-const ASSIST_SAMPLE_GAP: Duration = Duration::from_secs(2);
-const STRAY_YELLOW_MIN: usize = 40;
 /// Shorter recordings without any event are discarded as false starts.
 const MIN_MATCH_SECONDS: f64 = 20.0;
 
@@ -92,14 +89,11 @@ struct ActiveMatch {
     video: PathBuf,
     info: MatchInfo,
     recorder: Recorder,
-    /// Killfeed region; without a calibration the match is only recorded.
-    region: Option<RegionPct>,
     kills: RowCounter,
     deaths: RowCounter,
     assists: RowCounter,
     last_generation: u64,
     stop_at: Option<Instant>,
-    last_assist_sample: Option<Instant>,
 }
 
 pub struct AutoRecorder {
@@ -197,13 +191,11 @@ impl AutoRecorder {
             video: video.clone(),
             info,
             recorder,
-            region: cfg.killfeed_region,
             kills: RowCounter::default(),
             deaths: RowCounter::default(),
             assists: RowCounter::default(),
             last_generation: 0,
             stop_at: None,
-            last_assist_sample: None,
         });
         Ok(video)
     }
@@ -248,7 +240,8 @@ impl AutoRecorder {
 }
 
 fn detect(m: &mut ActiveMatch) -> Vec<Notice> {
-    let Some(region) = m.region else { return Vec::new() };
+    // Without a killfeed calibration the recorder captures no detection
+    // frames and the match is only recorded.
     let sink = m.recorder.frames();
     let frame = {
         let s = sink.lock().unwrap();
@@ -259,9 +252,9 @@ fn detect(m: &mut ActiveMatch) -> Vec<Notice> {
         s.latest.clone()
     };
     let (Some(frame), Some(t)) = (frame, m.recorder.elapsed()) else { return Vec::new() };
-    let Ok(crop) = frame.crop_rgb(region) else { return Vec::new() };
+    let Some(crop) = frame.to_rgb() else { return Vec::new() };
 
-    let scan = killfeed::scan(&crop, killfeed::ROW_HEIGHT_FRAC * frame.height as f32);
+    let scan = killfeed::scan(&crop, killfeed::ROW_HEIGHT_FRAC * frame.source_height as f32);
     let mut notices = Vec::new();
     let found = [
         (EventKind::Kill, m.kills.update(scan.kills)),
@@ -274,16 +267,7 @@ fn detect(m: &mut ActiveMatch) -> Vec<Notice> {
             notices.push(Notice::Event { kind, t });
         }
     }
-    if notices.is_empty() {
-        if scan.stray_yellow >= STRAY_YELLOW_MIN
-            && m.last_assist_sample.is_none_or(|s| s.elapsed() >= ASSIST_SAMPLE_GAP)
-        {
-            m.last_assist_sample = Some(Instant::now());
-            if let Ok(dir) = config::assist_samples_dir() {
-                let _ = crop.save(dir.join(format!("{} {t:07.1}s.png", stem(&m.video))));
-            }
-        }
-    } else {
+    if !notices.is_empty() {
         let _ = m.info.save(&m.video);
         if let Ok(dir) = config::detect_samples_dir() {
             let _ = crop.save(dir.join(format!("{} {t:07.1}s.png", stem(&m.video))));
