@@ -78,6 +78,7 @@ export const api = {
   reveal: (path: string) => invoke<void>("reveal", { path }),
   openPath: (path: string) => invoke<void>("open_path", { path }),
   cutRange: (video: string, start: number, end: number) => invoke<string>("cut_range", { video, start, end }),
+  reanalyze: (video: string) => invoke<void>("reanalyze_match", { video }),
   grabGameFrame: () => invoke<GameFrame>("grab_game_frame"),
   saveRegion: (region: RegionPct) => invoke<void>("save_region", { region }),
   getAutostart: () => invoke<boolean>("get_autostart"),

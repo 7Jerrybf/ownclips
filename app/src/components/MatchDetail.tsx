@@ -1,6 +1,7 @@
 // One match: the full recording with a marked timeline, the event list,
 // and its highlight ranges (played straight from the recording; a range can
 // be exported to a file on request).
+import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { EventKind, MatchSummary } from "../api";
 import { api, fileUrl } from "../api";
@@ -38,6 +39,27 @@ export function MatchDetail({
 }) {
   const video = useRef<HTMLVideoElement>(null);
   const [current, setCurrent] = useState(0);
+  const [reanalyzing, setReanalyzing] = useState<number | null>(null);
+
+  useEffect(() => {
+    const unlisten = listen<[string, number]>("reanalyze-progress", (e) => {
+      if (e.payload[0] === match.video) setReanalyzing(e.payload[1]);
+    });
+    return () => {
+      unlisten.then((f) => f());
+    };
+  }, [match.video]);
+
+  async function reanalyze() {
+    setReanalyzing(0);
+    try {
+      await api.reanalyze(match.video);
+      notify("已重新偵測擊殺 / 死亡 / 助攻", "success");
+    } catch (e) {
+      notify(String(e), "error");
+    }
+    setReanalyzing(null);
+  }
   const [duration, setDuration] = useState(match.info.duration ?? 0);
   const [range, setRange] = useState<[number | null, number | null]>([null, null]);
   const [busy, setBusy] = useState(false);
@@ -146,6 +168,16 @@ export function MatchDetail({
           <div className="page-sub">
             {shortDate(match.info.started_at)} · {clock(duration)}
           </div>
+        </div>
+        <div className="page-actions">
+          <button
+            className="btn"
+            disabled={reanalyzing !== null || match.recording}
+            onClick={reanalyze}
+            title="用最新的偵測方式重新掃描整場錄影,補上漏掉的擊殺 / 死亡 / 助攻"
+          >
+            {reanalyzing === null ? "重新偵測 KDA" : `偵測中… ${Math.round(reanalyzing * 100)}%`}
+          </button>
         </div>
       </div>
 

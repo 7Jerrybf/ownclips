@@ -379,6 +379,23 @@ async fn cut_range(video: String, start: f64, end: f64) -> CmdResult<String> {
     .map_err(err)?
 }
 
+/// Runs the current detector over a finished recording again, reporting
+/// progress (0..1) as "reanalyze-progress" events.
+#[tauri::command]
+async fn reanalyze_match(app: AppHandle, video: String) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = PathBuf::from(&video);
+        ownclips::session::reanalyze(&path, |p| {
+            let _ = app.emit("reanalyze-progress", (&video, p));
+        })
+        .map_err(|e| format!("{e:#}"))?;
+        let _ = app.emit("library-changed", ());
+        Ok(())
+    })
+    .await
+    .map_err(err)?
+}
+
 // ---------- killfeed calibration ----------
 
 #[derive(Serialize)]
@@ -475,6 +492,7 @@ fn main() {
             reveal,
             open_path,
             cut_range,
+            reanalyze_match,
             grab_game_frame,
             save_region,
             get_autostart,

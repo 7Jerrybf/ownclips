@@ -7,9 +7,12 @@
 // kill events (the app computes them); nothing is cut automatically.
 //
 // `AutoRecorder::tick` drives everything, so the same logic can run from
-// the command line or from the app's background thread.
+// the command line or from the app's background thread. `reanalyze` runs
+// the detector again over a finished recording.
 use std::fs;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -18,6 +21,7 @@ use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::capture;
+use crate::clip;
 use crate::config;
 use crate::gamestate::{self, GameEvent, LogWatcher};
 use crate::killfeed::{self, RowCounter};
@@ -257,9 +261,9 @@ fn detect(m: &mut ActiveMatch) -> Vec<Notice> {
     let scan = killfeed::scan(&crop, killfeed::ROW_HEIGHT_FRAC * frame.source_height as f32);
     let mut notices = Vec::new();
     let found = [
-        (EventKind::Kill, m.kills.update(scan.kills)),
-        (EventKind::Death, m.deaths.update(scan.deaths)),
-        (EventKind::Assist, m.assists.update(scan.assists)),
+        (EventKind::Kill, m.kills.update(&scan.kills, t)),
+        (EventKind::Death, m.deaths.update(&scan.deaths, t)),
+        (EventKind::Assist, m.assists.update(&scan.assists, t)),
     ];
     for (kind, n) in found {
         for _ in 0..n {
@@ -274,6 +278,104 @@ fn detect(m: &mut ActiveMatch) -> Vec<Notice> {
         }
     }
     notices
+}
+
+/// Frames per second read when re-analyzing (the live detector sees 4).
+const REANALYZE_FPS: u32 = 8;
+
+/// Runs the current killfeed detector over a finished recording and
+/// rewrites its events. Kills logged live (seen uncompressed) that the new
+/// pass doesn't find are kept; deaths and assists come from the new pass
+/// only. The events file as first recorded is kept as `.events.orig.json`.
+pub fn reanalyze(video: &Path, mut progress: impl FnMut(f64)) -> Result<MatchInfo> {
+    let mut info = MatchInfo::load(video).ok_or_else(|| anyhow!("找不到這場錄影的事件檔"))?;
+    // The live events to merge with are always the ones first recorded.
+    let original = video.with_extension("events.orig.json");
+    let live: Vec<MatchEvent> = fs::read_to_string(&original)
+        .ok()
+        .and_then(|s| serde_json::from_str::<MatchInfo>(&s).ok())
+        .map_or_else(|| info.events.clone(), |o| o.events);
+    let region = config::load()?.killfeed_region.ok_or_else(|| anyhow!("還沒校準 killfeed 區域"))?;
+    let (width, height) = video_size(video)?;
+    let (x0, y0, x1, y1) = capture::region_px(config::detect_region(region), width, height);
+    let (w, h) = (x1 - x0, y1 - y0);
+
+    let mut ffmpeg = clip::ffmpeg()?
+        // GPU decoding where available: a long 1440p match takes minutes on the CPU.
+        .args(["-v", "error", "-hwaccel", "auto", "-i"])
+        .arg(video)
+        .args(["-map", "0:v:0", "-vf", &format!("fps={REANALYZE_FPS},crop={w}:{h}:{x0}:{y0}")])
+        .args(["-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let mut frames = ffmpeg.stdout.take().unwrap();
+    let mut buf = vec![0u8; (w * h * 3) as usize];
+    let row_h = killfeed::ROW_HEIGHT_FRAC * height as f32;
+    let (mut kills, mut deaths, mut assists) = (RowCounter::default(), RowCounter::default(), RowCounter::default());
+    let mut events = Vec::new();
+    let duration = info.duration.unwrap_or(0.0);
+    let mut i = 0u64;
+    while frames.read_exact(&mut buf).is_ok() {
+        let t = i as f64 / REANALYZE_FPS as f64;
+        i += 1;
+        let Some(img) = image::RgbImage::from_raw(w, h, buf.clone()) else { break };
+        let scan = killfeed::scan(&img, row_h);
+        let found = [
+            (EventKind::Kill, kills.update(&scan.kills, t)),
+            (EventKind::Death, deaths.update(&scan.deaths, t)),
+            (EventKind::Assist, assists.update(&scan.assists, t)),
+        ];
+        for (kind, n) in found {
+            events.extend((0..n).map(|_| MatchEvent { t, kind }));
+        }
+        if duration > 0.0 && i % (REANALYZE_FPS as u64 * 5) == 0 {
+            progress((t / duration).min(1.0));
+        }
+    }
+    if !ffmpeg.wait()?.success() {
+        return Err(anyhow!("讀取錄影失敗: {}", video.display()));
+    }
+
+    // Each live kill matches at most one new kill (the new pass tends to
+    // see a row a few seconds later), so a double kill seen live survives a
+    // pass that only caught one of them.
+    let mut matched = vec![false; events.len()];
+    let mut unmatched = Vec::new();
+    for live in live.iter().filter(|e| e.kind == EventKind::Kill) {
+        let near = (0..matched.len())
+            .filter(|&j| !matched[j] && events[j].kind == EventKind::Kill && (events[j].t - live.t).abs() < 4.0)
+            .min_by(|&a, &b| (events[a].t - live.t).abs().total_cmp(&(events[b].t - live.t).abs()));
+        match near {
+            Some(j) => matched[j] = true,
+            None => unmatched.push(live.clone()),
+        }
+    }
+    events.extend(unmatched);
+    events.sort_by(|a, b| a.t.total_cmp(&b.t));
+
+    if !original.exists() {
+        fs::copy(MatchInfo::path_for(video), &original)?;
+    }
+    info.events = events;
+    info.save(video)?;
+    progress(1.0);
+    Ok(info)
+}
+
+/// Width and height of a video's first video stream, from ffmpeg's report.
+fn video_size(video: &Path) -> Result<(u32, u32)> {
+    let out = clip::ffmpeg()?.arg("-hide_banner").arg("-i").arg(video).output()?;
+    let report = String::from_utf8_lossy(&out.stderr);
+    report
+        .lines()
+        .filter(|l| l.contains("Video:"))
+        .flat_map(|l| l.split([' ', ',']))
+        .find_map(|tok| {
+            let (w, h) = tok.split_once('x')?;
+            Some((w.parse().ok()?, h.parse().ok()?)).filter(|&(w, h): &(u32, u32)| w >= 16 && h >= 16)
+        })
+        .ok_or_else(|| anyhow!("讀不到錄影的解析度: {}", video.display()))
 }
 
 fn stem(p: &Path) -> String {

@@ -10,14 +10,26 @@ fn main() -> Result<()> {
         Some("detect") => session::run(),
         Some("clip") => clip::run(),
         Some("record") => record_test(args.get(2), args.get(3), args.get(4)),
+        Some("reanalyze") if args.len() > 2 => reanalyze(&args[2..]),
         _ => {
-            println!("Usage: ownclips <detect|clip|record>");
+            println!("Usage: ownclips <detect|clip|record|reanalyze>");
             println!("  detect                         - auto-record each match and log your kills/deaths");
             println!("  clip                           - cut a highlight clip around each kill from the recordings");
             println!("  record [secs] [window] [audio] - test the built-in recorder (default 10s, VALORANT, audio mode from settings)");
+            println!("  reanalyze <video>...           - detect kills/deaths/assists again in finished recordings");
             Ok(())
         }
     }
+}
+
+fn reanalyze(videos: &[String]) -> Result<()> {
+    for video in videos {
+        print!("{video} ... ");
+        let info = session::reanalyze(std::path::Path::new(video), |_| {})?;
+        let n = |k| info.events.iter().filter(|e| e.kind == k).count();
+        println!("{} 擊殺 / {} 死亡 / {} 助攻", n(session::EventKind::Kill), n(session::EventKind::Death), n(session::EventKind::Assist));
+    }
+    Ok(())
 }
 
 /// Records `secs` seconds of the first window whose title contains `name`,

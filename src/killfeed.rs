@@ -16,8 +16,6 @@
 // check looks at the portrait's background instead: lime for the local
 // player where everyone else's is the row's team color. Rows either check
 // finds are counted once.
-use std::time::{Duration, Instant};
-
 use image::RgbImage;
 
 /// Killfeed row height as a fraction of the full game window height
@@ -309,29 +307,33 @@ fn lime_death_rows(img: &RgbImage, grid: &[Vec<Px>], bar_runs: &[(usize, usize)]
 /// re-count once it reappears, by then pushed up the feed. New rows always
 /// enter at the bottom, so an increase from a row that is not the newest is
 /// only trusted when nothing was counted within a row's on-screen lifetime.
+///
+/// Times are seconds into the recording, so a recording can be re-analyzed
+/// offline with the same results.
 #[derive(Default)]
 pub struct RowCounter {
-    recent: Vec<(usize, Instant)>,
-    last_counted: Option<Instant>,
+    recent: Vec<(usize, f64)>,
+    last_counted: Option<f64>,
 }
 
-const COUNT_MEMORY: Duration = Duration::from_millis(1500);
-const ROW_LIFETIME: Duration = Duration::from_secs(7);
+const COUNT_MEMORY: f64 = 1.5;
+const ROW_LIFETIME: f64 = 7.0;
 
 impl RowCounter {
-    /// Feeds one poll's rows; returns how many new events they represent.
-    pub fn update(&mut self, rows: SelfRows) -> usize {
-        self.recent.retain(|(_, t)| t.elapsed() < COUNT_MEMORY);
+    /// Feeds the rows seen at time `t`; returns how many new events they
+    /// represent.
+    pub fn update(&mut self, rows: &SelfRows, t: f64) -> usize {
+        self.recent.retain(|&(_, seen)| t - seen < COUNT_MEMORY);
         let prev = self.recent.iter().map(|(c, _)| *c).max().unwrap_or(0);
-        self.recent.push((rows.count, Instant::now()));
+        self.recent.push((rows.count, t));
         if rows.count <= prev {
             return 0;
         }
-        let recently_counted = self.last_counted.is_some_and(|t| t.elapsed() < ROW_LIFETIME);
+        let recently_counted = self.last_counted.is_some_and(|c| t - c < ROW_LIFETIME);
         if !rows.newest && recently_counted {
             return 0; // an already-counted row resurfacing higher up the feed
         }
-        self.last_counted = Some(Instant::now());
+        self.last_counted = Some(t);
         rows.count - prev
     }
 }
