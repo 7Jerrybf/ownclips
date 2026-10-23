@@ -1,6 +1,7 @@
 // OwnClips desktop app backend: runs the auto recorder in a background
-// thread (reporting to the UI through events) and exposes the recordings,
-// clips, settings and killfeed calibration to the web frontend.
+// thread (reporting to the UI and the tray icon through events) and exposes
+// the recordings, clips, settings and killfeed calibration to the web
+// frontend. Closing the window keeps it running in the tray.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::fs;
@@ -18,7 +19,11 @@ use ownclips::clip;
 use ownclips::config::{self, Config, RegionPct};
 use ownclips::session::{AutoRecorder, EventKind, MatchInfo, Notice};
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, RunEvent, State};
+use tauri::image::Image;
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WindowEvent, Wry};
+use tauri_plugin_autostart::ManagerExt as _;
 
 type CmdResult<T> = Result<T, String>;
 
@@ -128,7 +133,9 @@ fn apply_notice(app: &AppHandle, status: &Mutex<RecorderStatus>, notice: Notice)
             }
         }
     };
-    let _ = app.emit("recorder-status", status.lock().unwrap().clone());
+    let current = status.lock().unwrap().clone();
+    update_tray(app, &current);
+    let _ = app.emit("recorder-status", current);
     if let Some(t) = toast {
         let _ = app.emit("toast", t);
     }
@@ -139,6 +146,115 @@ fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+// ---------- tray ----------
+
+/// Passed by the Windows autostart entry: start hidden in the tray.
+const BACKGROUND_ARG: &str = "--background";
+
+struct Tray {
+    icon: TrayIcon,
+    status_item: MenuItem<Wry>,
+    idle: Image<'static>,
+    recording: Image<'static>,
+}
+
+/// The app icon, and the same icon with a red dot for "recording".
+fn tray_images() -> (Image<'static>, Image<'static>) {
+    let idle = image::load_from_memory(include_bytes!("../icons/32x32.png")).expect("bundled icon").into_rgba8();
+    let mut rec = idle.clone();
+    let (w, h) = rec.dimensions();
+    let r = w as f32 * 0.22;
+    let (cx, cy) = (w as f32 - r - 1.0, h as f32 - r - 1.0);
+    for (x, y, p) in rec.enumerate_pixels_mut() {
+        let d = ((x as f32 + 0.5 - cx).powi(2) + (y as f32 + 0.5 - cy).powi(2)).sqrt();
+        if d <= r {
+            *p = image::Rgba([239, 68, 68, 255]);
+        } else if d <= r + 1.5 {
+            *p = image::Rgba([255, 255, 255, 255]);
+        }
+    }
+    let to_image = |img: image::RgbaImage| Image::new_owned(img.into_raw(), w, h);
+    (to_image(idle), to_image(rec))
+}
+
+fn show_main(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.unminimize();
+        let _ = w.show();
+        let _ = w.set_focus();
+    }
+}
+
+fn build_tray(app: &AppHandle) -> tauri::Result<Tray> {
+    let (idle, recording) = tray_images();
+    let status_item = MenuItem::with_id(app, "status", "等待對局中", false, None::<&str>)?;
+    let menu = Menu::with_items(
+        app,
+        &[
+            &status_item,
+            &PredefinedMenuItem::separator(app)?,
+            &MenuItem::with_id(app, "open", "開啟 OwnClips", true, None::<&str>)?,
+            &MenuItem::with_id(app, "folder", "開啟錄影資料夾", true, None::<&str>)?,
+            &PredefinedMenuItem::separator(app)?,
+            &MenuItem::with_id(app, "quit", "結束 OwnClips", true, None::<&str>)?,
+        ],
+    )?;
+    let icon = TrayIconBuilder::with_id("main")
+        .icon(idle.clone())
+        .tooltip("OwnClips · 等待對局中")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "open" => show_main(app),
+            "folder" => {
+                if let Ok(dir) = config::load().and_then(|c| c.recordings_dir()) {
+                    let _ = fs::create_dir_all(&dir);
+                    let _ = open_path(dir.to_string_lossy().into_owned());
+                }
+            }
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = event {
+                show_main(tray.app_handle());
+            }
+        })
+        .build(app)?;
+    Ok(Tray { icon, status_item, idle, recording })
+}
+
+fn update_tray(app: &AppHandle, s: &RecorderStatus) {
+    let Some(tray) = app.try_state::<Tray>() else { return };
+    let recording = s.state == "recording";
+    let text = if recording {
+        format!(
+            "錄影中 · {} · {}  {}/{}/{}",
+            s.mode.as_deref().unwrap_or("?"),
+            s.map.as_deref().unwrap_or("?"),
+            s.kills,
+            s.deaths,
+            s.assists
+        )
+    } else {
+        "等待對局中".to_string()
+    };
+    let _ = tray.status_item.set_text(&text);
+    let _ = tray.icon.set_tooltip(Some(format!("OwnClips · {text}")));
+    let _ = tray.icon.set_icon(Some(if recording { tray.recording.clone() } else { tray.idle.clone() }));
+}
+
+#[tauri::command]
+fn get_autostart(app: AppHandle) -> CmdResult<bool> {
+    app.autolaunch().is_enabled().map_err(err)
+}
+
+#[tauri::command]
+fn set_autostart(app: AppHandle, enabled: bool) -> CmdResult<()> {
+    let launcher = app.autolaunch();
+    if enabled { launcher.enable() } else { launcher.disable() }.map_err(err)
 }
 
 #[tauri::command]
@@ -318,21 +434,33 @@ fn main() {
     let app = tauri::Builder::default()
         // Two copies would both record every match: a second launch just
         // brings the running window forward.
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            if let Some(w) = app.get_webview_window("main") {
-                let _ = w.unminimize();
-                let _ = w.show();
-                let _ = w.set_focus();
-            }
-        }))
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)))
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec![BACKGROUND_ARG]),
+        ))
         .plugin(tauri_plugin_dialog::init())
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                if config::load().map(|c| c.close_to_tray).unwrap_or(true) {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .setup(|app| {
             // The installer ships ffmpeg next to the app.
             if let Ok(dir) = app.path().resource_dir() {
                 ownclips::clip::set_bundled_ffmpeg(dir.join("ffmpeg").join("ffmpeg.exe"));
             }
+            let tray = build_tray(app.handle())?;
+            app.manage(tray);
             let bg = start_background(app.handle().clone());
             app.manage(bg);
+            // The window starts hidden; launched by autostart it stays in the tray.
+            if !std::env::args().any(|a| a == BACKGROUND_ARG) {
+                show_main(app.handle());
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -349,6 +477,8 @@ fn main() {
             cut_range,
             grab_game_frame,
             save_region,
+            get_autostart,
+            set_autostart,
         ])
         .build(tauri::generate_context!())
         .expect("failed to build app");

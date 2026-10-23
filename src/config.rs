@@ -32,6 +32,8 @@ pub struct Config {
     pub audio_mode: AudioMode,
     pub video_fps: u32,
     pub video_bitrate_mbps: u32,
+    /// Closing the window hides it to the tray and keeps recording.
+    pub close_to_tray: bool,
 }
 
 /// Where the killfeed sits with Valorant's default HUD on a 16:9 screen
@@ -48,6 +50,7 @@ impl Default for Config {
             audio_mode: AudioMode::Game,
             video_fps: 60,
             video_bitrate_mbps: 20,
+            close_to_tray: true,
         }
     }
 }

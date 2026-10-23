@@ -24,6 +24,7 @@ export function SettingsView({
   const [dir, setDir] = useState("");
   const [ffmpeg, setFfmpeg] = useState<boolean | null>(null);
   const [encoder, setEncoder] = useState<string | null>(null);
+  const [autostart, setAutostart] = useState<boolean | null>(null);
   const [saved, setSaved] = useState(false);
   const first = useRef(true);
 
@@ -31,6 +32,7 @@ export function SettingsView({
     api.getConfig().then(setCfg).catch((e) => notify(String(e), "error"));
     api.ffmpegAvailable().then(setFfmpeg);
     api.encoderName().then(setEncoder).catch(() => {});
+    api.getAutostart().then(setAutostart).catch(() => {});
   }, [notify]);
 
   useEffect(() => {
@@ -59,6 +61,16 @@ export function SettingsView({
 
   if (!cfg) return <div className="page" />;
   const set = <K extends keyof Config>(k: K, v: Config[K]) => setCfg({ ...cfg, [k]: v });
+
+  async function toggleAutostart() {
+    const next = !autostart;
+    try {
+      await api.setAutostart(next);
+      setAutostart(next);
+    } catch (e) {
+      notify(String(e), "error");
+    }
+  }
 
   async function pickDir() {
     const picked = await open({ directory: true, defaultPath: dir });
@@ -148,6 +160,33 @@ export function SettingsView({
                 <IconFolder size={16} />
               </button>
             </div>
+          </div>
+        </div>
+
+        <div className="section-title">背景執行</div>
+        <div className="section">
+          <div className="field">
+            <div className="field-label">
+              <b>關閉視窗時縮到系統匣</b>
+              <span>按 ✕ 後 OwnClips 繼續在右下角背景偵測、錄影;要完全結束請在系統匣圖示按右鍵</span>
+            </div>
+            <button
+              className={`switch ${cfg.close_to_tray ? "on" : ""}`}
+              aria-pressed={cfg.close_to_tray}
+              onClick={() => set("close_to_tray", !cfg.close_to_tray)}
+            />
+          </div>
+          <div className="field">
+            <div className="field-label">
+              <b>開機時自動啟動</b>
+              <span>登入 Windows 後直接在背景待命,不會跳出視窗,開打就自動錄</span>
+            </div>
+            <button
+              className={`switch ${autostart ? "on" : ""}`}
+              aria-pressed={!!autostart}
+              disabled={autostart === null}
+              onClick={toggleAutostart}
+            />
           </div>
         </div>
 

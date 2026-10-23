@@ -40,6 +40,7 @@ export interface Config {
   audio_mode: AudioMode;
   video_fps: number;
   video_bitrate_mbps: number;
+  close_to_tray: boolean;
 }
 
 export interface RecorderStatus {
@@ -79,6 +80,8 @@ export const api = {
   cutRange: (video: string, start: number, end: number) => invoke<string>("cut_range", { video, start, end }),
   grabGameFrame: () => invoke<GameFrame>("grab_game_frame"),
   saveRegion: (region: RegionPct) => invoke<void>("save_region", { region }),
+  getAutostart: () => invoke<boolean>("get_autostart"),
+  setAutostart: (enabled: boolean) => invoke<void>("set_autostart", { enabled }),
 };
 
 /** URL the webview can load a local file from. */

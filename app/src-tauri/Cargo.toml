@@ -8,7 +8,8 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 ownclips = { path = "../.." }
-tauri = { version = "2", features = ["protocol-asset"] }
+tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }
+tauri-plugin-autostart = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
