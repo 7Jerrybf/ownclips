@@ -1009,3 +1009,28 @@ button {
     max-height: 420px;
   }
 }
+.day-group + .day-group {
+  margin-top: 30px;
+}
+.day-head {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 12px 0 10px;
+  margin-bottom: 14px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+.day-head b {
+  font-size: 17px;
+}
+.day-head span {
+  color: var(--muted);
+}
+.day-head .day-summary {
+  margin-left: auto;
+  font-size: 13px;
+}

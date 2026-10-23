@@ -2,8 +2,9 @@
 // a separate file: previews and playback come from the full recordings.
 import { useMemo, useState } from "react";
 import type { MatchSummary } from "../api";
-import { clock, shortDate } from "../format";
+import { clock, type DateRange, inRange, timeOf } from "../format";
 import { type Highlight, highlights, killLabel } from "../highlights";
+import { DayGroups, RangeFilter } from "./DayGroups";
 import { IconClips, IconPlay } from "./Icons";
 import { VideoThumb } from "./VideoThumb";
 
@@ -21,13 +22,16 @@ export function HighlightsView({
   onOpen: (h: Highlight) => void;
 }) {
   const [filter, setFilter] = useState<Filter>("all");
+  const [range, setRange] = useState<DateRange>("all");
   const [hovered, setHovered] = useState<string | null>(null);
 
   const all = useMemo(
     () => matches.filter((m) => !m.recording).flatMap((m) => highlights(m, pre, post).reverse()),
     [matches, pre, post],
   );
-  const shown = filter === "all" ? all : all.filter((h) => h.kills >= 2);
+  const shown = all.filter(
+    (h) => (filter === "all" || h.kills >= 2) && inRange(h.match.info.started_at, range),
+  );
   const multi = all.filter((h) => h.kills >= 2).length;
 
   return (
@@ -50,6 +54,7 @@ export function HighlightsView({
             多殺
           </button>
         </div>
+        <RangeFilter value={range} onChange={setRange} />
       </div>
 
       {shown.length === 0 ? (
@@ -59,8 +64,12 @@ export function HighlightsView({
           <div>每次擊殺都會自動成為一個精華區間,相近的擊殺會合併成多殺。</div>
         </div>
       ) : (
-        <div className="grid">
-          {shown.map((h) => {
+        <DayGroups
+          items={shown}
+          startedAt={(h) => h.match.info.started_at}
+          summary={(day) => `${day.length} 個精華 · ${day.filter((h) => h.kills >= 2).length} 個多殺`}
+        >
+          {(h) => {
             const key = `${h.match.video}@${h.start}`;
             return (
               <div
@@ -89,14 +98,14 @@ export function HighlightsView({
                       {h.match.info.mode} · 對局 {clock(h.start)} – {clock(h.end)}
                     </span>
                     <span className="card-meta" style={{ marginLeft: "auto" }}>
-                      {shortDate(h.match.info.started_at)}
+                      {timeOf(h.match.info.started_at)}
                     </span>
                   </div>
                 </div>
               </div>
             );
-          })}
-        </div>
+          }}
+        </DayGroups>
       )}
     </div>
   );

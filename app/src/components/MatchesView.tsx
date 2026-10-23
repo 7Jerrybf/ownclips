@@ -1,7 +1,8 @@
 import { useState } from "react";
 import type { MatchSummary } from "../api";
 import { api } from "../api";
-import { clock, count, shortDate, size } from "../format";
+import { clock, count, type DateRange, inRange, size, timeOf } from "../format";
+import { DayGroups, RangeFilter } from "./DayGroups";
 import { IconFolder, IconMatches, IconRefresh, IconTrash } from "./Icons";
 import { VideoThumb } from "./VideoThumb";
 
@@ -18,6 +19,8 @@ export function MatchesView({
 }) {
   const [confirm, setConfirm] = useState<string | null>(null);
   const [hovered, setHovered] = useState<string | null>(null);
+  const [range, setRange] = useState<DateRange>("all");
+  const shown = matches.filter((m) => inRange(m.info.started_at, range));
   const totalKills = matches.reduce((n, m) => n + count(m.info.events, "kill"), 0);
 
   async function remove(m: MatchSummary) {
@@ -50,15 +53,21 @@ export function MatchesView({
         </div>
       </div>
 
-      {matches.length === 0 ? (
+      {matches.length > 0 && (
+        <div className="filter-row">
+          <RangeFilter value={range} onChange={setRange} />
+        </div>
+      )}
+
+      {shown.length === 0 ? (
         <div className="empty">
           <IconMatches size={34} />
-          <h3>還沒有錄影</h3>
+          <h3>{matches.length === 0 ? "還沒有錄影" : "這段期間沒有錄影"}</h3>
           <div>開著 OwnClips 去打一場,對局開始時會自動錄影,結束後出現在這裡。</div>
         </div>
       ) : (
-        <div className="grid">
-          {matches.map((m) => {
+        <DayGroups items={shown} startedAt={(m) => m.info.started_at} summary={daySummary}>
+          {(m) => {
             const kills = count(m.info.events, "kill");
             const deaths = count(m.info.events, "death");
             const assists = count(m.info.events, "assist");
@@ -95,7 +104,7 @@ export function MatchesView({
                     <span className="chip death num">{deaths} 死亡</span>
                     {assists > 0 && <span className="chip assist num">{assists} 助攻</span>}
                     <span className="card-meta" style={{ marginLeft: "auto" }}>
-                      {shortDate(m.info.started_at)}
+                      {timeOf(m.info.started_at)}
                     </span>
                   </div>
                   {dur > 0 && (
@@ -143,11 +152,16 @@ export function MatchesView({
                 </div>
               </div>
             );
-          })}
-        </div>
+          }}
+        </DayGroups>
       )}
     </div>
   );
+}
+
+function daySummary(day: MatchSummary[]) {
+  const total = (kind: "kill" | "death" | "assist") => day.reduce((n, m) => n + count(m.info.events, kind), 0);
+  return `${day.length} 場 · ${total("kill")} / ${total("death")} / ${total("assist")}`;
 }
 
 /** A representative frame: the middle kill, or a third of the way in. */
