@@ -75,6 +75,11 @@ export interface GameFrame {
   height: number;
 }
 
+export interface UpdateInfo {
+  version: string;
+  notes: string | null;
+}
+
 export interface Toast {
   kind: "start" | "stop" | "info" | "error" | "success";
   message: string;
@@ -100,6 +105,8 @@ export const api = {
   saveRegion: (region: RegionPct) => invoke<void>("save_region", { region }),
   getAutostart: () => invoke<boolean>("get_autostart"),
   setAutostart: (enabled: boolean) => invoke<void>("set_autostart", { enabled }),
+  checkUpdate: () => invoke<UpdateInfo | null>("check_update"),
+  installUpdate: () => invoke<void>("install_update"),
 };
 
 /** URL the webview can load a local file from. */

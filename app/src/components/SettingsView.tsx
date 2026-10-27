@@ -6,6 +6,7 @@ import { api } from "../api";
 import { Calibration } from "./Calibration";
 import { size } from "../format";
 import { IconFolder } from "./Icons";
+import type { Updates } from "./Update";
 
 const CODECS: { codec: VideoCodec; label: string; desc: string }[] = [
   { codec: "av1", label: "AV1", desc: "檔案大約只有 H.264 的一半,畫質幾乎一樣(建議)" },
@@ -28,10 +29,13 @@ const AUDIO: { mode: AudioMode; title: string; desc: string }[] = [
 export function SettingsView({
   notify,
   onSaved,
+  updates,
 }: {
   notify: (message: string, kind?: "error" | "success") => void;
   onSaved: () => void;
+  updates: Updates;
 }) {
+  const [checking, setChecking] = useState(false);
   const [cfg, setCfg] = useState<Config | null>(null);
   const [dir, setDir] = useState("");
   const [ffmpeg, setFfmpeg] = useState<boolean | null>(null);
@@ -406,6 +410,31 @@ export function SettingsView({
             }}
             notify={notify}
           />
+        </div>
+
+        <div className="section-title">關於</div>
+        <div className="section">
+          <div className="field">
+            <div className="field-label">
+              <b>OwnClips {updates.current}</b>
+              <span>
+                {updates.available
+                  ? `有新版本 ${updates.available.version},可以在左下角更新`
+                  : "啟動時和每隔幾小時會自動檢查新版本"}
+              </span>
+            </div>
+            <button
+              className="btn sm"
+              disabled={checking}
+              onClick={async () => {
+                setChecking(true);
+                await updates.check(true);
+                setChecking(false);
+              }}
+            >
+              {checking ? "檢查中…" : "檢查更新"}
+            </button>
+          </div>
         </div>
       </div>
     </div>

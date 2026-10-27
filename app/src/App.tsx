@@ -8,6 +8,7 @@ import { MatchDetail } from "./components/MatchDetail";
 import { MatchesView } from "./components/MatchesView";
 import { SettingsView } from "./components/SettingsView";
 import { Toasts, type ToastItem } from "./components/Toasts";
+import { UpdateCard, useUpdates } from "./components/Update";
 import { clock } from "./format";
 
 type Page = "matches" | "highlights" | "settings";
@@ -27,6 +28,7 @@ export default function App() {
     setToasts((t) => [...t, { id, kind, message }]);
     setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 4500);
   }, []);
+  const updates = useUpdates(notify);
 
   const refresh = useCallback(() => {
     api.listMatches().then(setMatches).catch((e) => notify(String(e), "error"));
@@ -82,6 +84,7 @@ export default function App() {
           <IconSettings /> 設定
         </button>
         <div className="sidebar-spacer" />
+        <UpdateCard updates={updates} recording={status?.state === "recording"} />
         <StatusCard status={status} calibrated={calibrated} onFix={() => go("settings")} />
       </aside>
 
@@ -106,7 +109,7 @@ export default function App() {
             onOpen={(h) => setOpen({ match: h.match, range: [h.start, h.end] })}
           />
         ) : null}
-        {!open && page === "settings" && <SettingsView notify={notify} onSaved={refresh} />}
+        {!open && page === "settings" && <SettingsView notify={notify} onSaved={refresh} updates={updates} />}
       </main>
       <Toasts items={toasts} />
     </div>

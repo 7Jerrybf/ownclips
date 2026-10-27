@@ -1043,3 +1043,11 @@ button {
   margin-left: auto;
   font-size: 13px;
 }
+
+.status-card.update-card {
+  border-color: rgba(96, 165, 250, 0.45);
+  background: linear-gradient(180deg, rgba(96, 165, 250, 0.12), var(--panel-2));
+}
+.dot.update {
+  background: #60a5fa;
+}

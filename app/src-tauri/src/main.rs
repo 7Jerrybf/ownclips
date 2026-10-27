@@ -1,7 +1,7 @@
 // OwnClips desktop app backend: runs the auto recorder in a background
 // thread (reporting to the UI and the tray icon through events) and exposes
-// the recordings, clips, settings and killfeed calibration to the web
-// frontend. Closing the window keeps it running in the tray.
+// the recordings, clips, settings, killfeed calibration and app updates to
+// the web frontend. Closing the window keeps it running in the tray.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::fs;
@@ -24,6 +24,7 @@ use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WindowEvent, Wry};
 use tauri_plugin_autostart::ManagerExt as _;
+use tauri_plugin_updater::UpdaterExt as _;
 
 type CmdResult<T> = Result<T, String>;
 
@@ -86,6 +87,17 @@ fn start_background(app: AppHandle) -> Background {
         }
     });
     Background { status, stop, thread: Mutex::new(Some(thread)) }
+}
+
+/// Stops the auto recorder, finishing a recording in progress so the file
+/// stays playable.
+fn stop_background(app: &AppHandle) {
+    let bg = app.state::<Background>();
+    bg.stop.store(true, Ordering::Relaxed);
+    let thread = bg.thread.lock().unwrap().take();
+    if let Some(t) = thread {
+        let _ = t.join();
+    }
 }
 
 fn apply_notice(app: &AppHandle, status: &Mutex<RecorderStatus>, notice: Notice) {
@@ -443,6 +455,58 @@ fn set_keep(app: AppHandle, video: String, keep: bool) -> CmdResult<()> {
     Ok(())
 }
 
+// ---------- updates ----------
+// New versions are published on the GitHub release "setup" with a
+// latest.json manifest (see tauri.conf.json); installers are signed and
+// checked against the public key before installing.
+
+#[derive(Serialize)]
+struct UpdateInfo {
+    version: String,
+    notes: Option<String>,
+}
+
+#[tauri::command]
+async fn check_update(app: AppHandle) -> CmdResult<Option<UpdateInfo>> {
+    let update = app.updater().map_err(err)?.check().await.map_err(err)?;
+    Ok(update.map(|u| UpdateInfo { version: u.version.clone(), notes: u.body.clone() }))
+}
+
+fn recording(app: &AppHandle) -> bool {
+    app.state::<Background>().status.lock().unwrap().state == "recording"
+}
+
+/// Downloads and installs the latest version, reporting download progress
+/// (0..1) as "update-progress" events. The installer closes the app and
+/// starts the new version. Never while recording.
+#[tauri::command]
+async fn install_update(app: AppHandle) -> CmdResult<()> {
+    const BUSY: &str = "錄影中不能更新,對局結束後再試";
+    if recording(&app) {
+        return Err(BUSY.into());
+    }
+    let update = app.updater().map_err(err)?.check().await.map_err(err)?.ok_or("已經是最新版本")?;
+    let mut received = 0u64;
+    let bytes = update
+        .download(
+            |chunk, total| {
+                received += chunk as u64;
+                if let Some(total) = total.filter(|&t| t > 0) {
+                    let _ = app.emit("update-progress", received as f64 / total as f64);
+                }
+            },
+            || {},
+        )
+        .await
+        .map_err(err)?;
+    // A match may have started during the download.
+    if recording(&app) {
+        return Err(BUSY.into());
+    }
+    stop_background(&app);
+    update.install(bytes).map_err(err)
+}
+
 // ---------- killfeed calibration ----------
 
 #[derive(Serialize)]
@@ -504,6 +568,7 @@ fn main() {
             Some(vec![BACKGROUND_ARG]),
         ))
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 if config::load().map(|c| c.close_to_tray).unwrap_or(true) {
@@ -547,19 +612,15 @@ fn main() {
             save_region,
             get_autostart,
             set_autostart,
+            check_update,
+            install_update,
         ])
         .build(tauri::generate_context!())
         .expect("failed to build app");
 
     app.run(|app, event| {
         if let RunEvent::Exit = event {
-            // Finish a recording in progress so the file stays playable.
-            let bg = app.state::<Background>();
-            bg.stop.store(true, Ordering::Relaxed);
-            let thread = bg.thread.lock().unwrap().take();
-            if let Some(t) = thread {
-                let _ = t.join();
-            }
+            stop_background(app);
         }
     });
 }
