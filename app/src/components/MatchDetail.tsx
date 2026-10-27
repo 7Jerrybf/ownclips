@@ -5,7 +5,7 @@ import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { EventKind, MatchSummary } from "../api";
 import { api, fileUrl } from "../api";
-import { clock, count, kindLabel, shortDate } from "../format";
+import { clock, count, gameLabel, kindLabel, shortDate } from "../format";
 import { type Highlight, highlights, killLabel } from "../highlights";
 import {
   IconAssist,
@@ -180,7 +180,7 @@ export function MatchDetail({
             </span>
           </h1>
           <div className="page-sub">
-            {shortDate(match.info.started_at)} · {clock(duration)}
+            {gameLabel[match.info.game]} · {shortDate(match.info.started_at)} · {clock(duration)}
           </div>
         </div>
         <div className="page-actions">
@@ -192,14 +192,16 @@ export function MatchDetail({
           >
             <IconKeep size={16} filled={match.info.keep} /> {match.info.keep ? "已保留" : "保留這場"}
           </button>
-          <button
-            className="btn"
-            disabled={reanalyzing !== null || match.recording}
-            onClick={reanalyze}
-            title="用最新的偵測方式重新掃描整場錄影,補上漏掉的擊殺 / 死亡 / 助攻"
-          >
-            {reanalyzing === null ? "重新偵測 KDA" : `偵測中… ${Math.round(reanalyzing * 100)}%`}
-          </button>
+          {match.info.game === "valorant" && (
+            <button
+              className="btn"
+              disabled={reanalyzing !== null || match.recording}
+              onClick={reanalyze}
+              title="用最新的偵測方式重新掃描整場錄影,補上漏掉的擊殺 / 死亡 / 助攻"
+            >
+              {reanalyzing === null ? "重新偵測 KDA" : `偵測中… ${Math.round(reanalyzing * 100)}%`}
+            </button>
+          )}
         </div>
       </div>
 

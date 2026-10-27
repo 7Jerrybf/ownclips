@@ -11,6 +11,7 @@ use windows_capture::settings::{
 use windows_capture::window::Window;
 
 use crate::config::RegionPct;
+use crate::gamestate::Game;
 
 /// One captured RGBA frame (or a region of it), copied out of the capture
 /// thread so the rest of the app never has to touch the underlying D3D
@@ -111,6 +112,16 @@ pub type Control = CaptureControl<CaptureHandler, Box<dyn std::error::Error + Se
 pub fn find_valorant_window() -> Result<Window> {
     Window::from_contains_name("VALORANT")
         .map_err(|e| anyhow!("找不到 Valorant 視窗,請先啟動遊戲並進入遊戲畫面再試一次: {e}"))
+}
+
+/// Finds the window of a running match of `game`.
+pub fn find_game_window(game: Game) -> Result<Window> {
+    match game {
+        Game::Valorant => find_valorant_window(),
+        // The match itself, not the lobby client ("League of Legends").
+        Game::League => Window::from_contains_name("League of Legends (TM) Client")
+            .map_err(|e| anyhow!("找不到英雄聯盟的遊戲視窗: {e}")),
+    }
 }
 
 /// Starts a background capture of `window` and returns a handle to stop it

@@ -19,7 +19,7 @@ const QUALITIES: { quality: VideoQuality; label: string }[] = [
 ];
 
 const AUDIO: { mode: AudioMode; title: string; desc: string }[] = [
-  { mode: "game", title: "只錄遊戲聲音", desc: "只抓 Valorant 的聲音,Discord、音樂不會錄進去(建議)" },
+  { mode: "game", title: "只錄遊戲聲音", desc: "只抓遊戲本身的聲音,Discord、音樂不會錄進去(建議)" },
   { mode: "system", title: "系統所有聲音", desc: "喇叭 / 耳機聽到的全部,包含語音和音樂" },
   { mode: "game_and_mic", title: "遊戲聲音 + 麥克風", desc: "遊戲聲音之外,也錄你的麥克風" },
   { mode: "off", title: "不錄聲音", desc: "只錄畫面" },

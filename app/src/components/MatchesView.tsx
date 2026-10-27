@@ -1,7 +1,7 @@
 import { useState } from "react";
 import type { MatchSummary } from "../api";
 import { api } from "../api";
-import { clock, count, type DateRange, inRange, size, timeOf } from "../format";
+import { clock, count, type DateRange, gameLabel, inRange, size, timeOf } from "../format";
 import { DayGroups, RangeFilter } from "./DayGroups";
 import { IconFolder, IconKeep, IconMatches, IconRefresh, IconTrash } from "./Icons";
 import { VideoThumb } from "./VideoThumb";
@@ -99,6 +99,7 @@ export function MatchesView({
                   <div className="shade" />
                   <div className="badge-tl">
                     {m.recording && <span className="chip rec">● 錄影 / 處理中</span>}
+                    {m.info.game === "league" && <span className="chip">{gameLabel.league}</span>}
                     <span className="chip">{m.info.mode}</span>
                     {m.info.keep && <span className="chip keep">已保留</span>}
                   </div>

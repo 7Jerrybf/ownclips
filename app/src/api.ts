@@ -2,6 +2,7 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 
 export type EventKind = "kill" | "death" | "assist";
+export type Game = "valorant" | "league";
 export type AudioMode = "game" | "system" | "game_and_mic" | "off";
 export type VideoCodec = "av1" | "h264";
 export type VideoQuality = "high" | "standard" | "small";
@@ -12,6 +13,7 @@ export interface MatchEvent {
 }
 
 export interface MatchInfo {
+  game: Game;
   map: string;
   mode: string;
   started_at: string;

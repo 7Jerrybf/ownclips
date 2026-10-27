@@ -12,6 +12,8 @@ image = "0.25"
 wasapi = "0.26"
 chrono = "0.4"
 ctrlc = "3"
+# League's local Live Client Data API (HTTPS with a self-signed certificate).
+ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
 
 [workspace]
 members = ["app/src-tauri"]

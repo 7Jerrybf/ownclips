@@ -1,4 +1,4 @@
-import type { EventKind, MatchEvent } from "./api";
+import type { EventKind, Game, MatchEvent } from "./api";
 
 /** 83.4 -> "1:23" (or "1:02:03" past an hour). */
 export function clock(seconds: number): string {
@@ -13,6 +13,8 @@ export function size(bytes: number): string {
   if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
   return `${Math.round(bytes / 1024 ** 2)} MB`;
 }
+
+export const gameLabel: Record<Game, string> = { valorant: "Valorant", league: "英雄聯盟" };
 
 export const kindLabel: Record<EventKind, string> = { kill: "擊殺", death: "死亡", assist: "助攻" };
 

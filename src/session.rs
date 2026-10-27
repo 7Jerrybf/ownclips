@@ -1,6 +1,7 @@
-// Automatic recording: waits for Valorant to enter a match (gamestate.rs),
-// records it with the built-in recorder, detects your kills and deaths on
-// the recorded frames, and stops when the match is over. Each recording
+// Automatic recording: waits for Valorant (gamestate.rs) or League of
+// Legends (league.rs) to enter a match, records it with the built-in
+// recorder, detects your kills and deaths (Valorant: on the recorded
+// frames; League: reported by the game), and stops when the match is over. Each recording
 // gets a `<recording>.events.json` next to it with the match info and every
 // event's time in the video; it is rewritten after each event so a crash
 // loses at most the video's ending. Highlights are just ranges around the
@@ -23,8 +24,9 @@ use serde::{Deserialize, Serialize};
 use crate::capture;
 use crate::clip;
 use crate::config;
-use crate::gamestate::{self, GameEvent, LogWatcher};
+use crate::gamestate::{self, Game, GameEvent, LogWatcher};
 use crate::killfeed::{self, RowCounter};
+use crate::league::LeagueWatcher;
 use crate::recorder::{self, Recorder};
 use crate::storage;
 
@@ -52,6 +54,9 @@ pub struct MatchEvent {
 /// Contents of `<recording>.events.json`.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct MatchInfo {
+    /// Recordings from before League support are all Valorant.
+    #[serde(default)]
+    pub game: Game,
     pub map: String,
     pub mode: String,
     /// Local time the recording started, "YYYY-MM-DD HH:MM:SS".
@@ -96,6 +101,7 @@ pub enum Notice {
 }
 
 struct ActiveMatch {
+    game: Game,
     video: PathBuf,
     info: MatchInfo,
     recorder: Recorder,
@@ -108,6 +114,7 @@ struct ActiveMatch {
 
 pub struct AutoRecorder {
     log: LogWatcher,
+    league: LeagueWatcher,
     current: Option<ActiveMatch>,
     /// Background work (muxing, clipping) reports back through here.
     done_tx: Sender<Notice>,
@@ -118,7 +125,7 @@ pub struct AutoRecorder {
 impl AutoRecorder {
     pub fn new() -> Result<Self> {
         let (done_tx, done_rx) = mpsc::channel();
-        let mut auto = Self { log: LogWatcher::new()?, current: None, done_tx, done_rx, jobs: Vec::new() };
+        let mut auto = Self { log: LogWatcher::new()?, league: LeagueWatcher::new(), current: None, done_tx, done_rx, jobs: Vec::new() };
         auto.recover();
         Ok(auto)
     }
@@ -146,7 +153,15 @@ impl AutoRecorder {
     pub fn tick(&mut self) -> Vec<Notice> {
         let mut notices: Vec<Notice> = self.done_rx.try_iter().collect();
         self.jobs.retain(|j| !j.is_finished());
-        for event in self.log.poll() {
+        let valorant = self.log.poll().into_iter().map(|e| (Game::Valorant, e));
+        let league = self.league.poll().into_iter().map(|e| (Game::League, e));
+        for (game, event) in valorant.chain(league).collect::<Vec<_>>() {
+            // Only the game being recorded can end or add to the recording.
+            if !matches!(event, GameEvent::MatchStarted { .. })
+                && self.current.as_ref().is_none_or(|m| m.game != game)
+            {
+                continue;
+            }
             match event {
                 GameEvent::MatchStarted { map, mode } => {
                     if self.current.is_some() {
@@ -156,9 +171,14 @@ impl AutoRecorder {
                         notices.push(Notice::Skipped { reason: format!("{mode}不錄影") });
                         continue;
                     }
-                    match self.start_match(map.clone(), mode.clone()) {
+                    match self.start_match(game, map.clone(), mode.clone()) {
                         Ok(video) => notices.push(Notice::Started { video, map, mode }),
                         Err(e) => notices.push(Notice::Error(format!("開始錄影失敗: {e:#}"))),
+                    }
+                }
+                GameEvent::Event { kind, ago } => {
+                    if let Some(m) = &mut self.current {
+                        notices.extend(add_reported_event(m, kind, ago));
                     }
                 }
                 GameEvent::MatchEnded => {
@@ -182,15 +202,21 @@ impl AutoRecorder {
         notices
     }
 
-    fn start_match(&mut self, map: String, mode: String) -> Result<PathBuf> {
+    fn start_match(&mut self, game: Game, map: String, mode: String) -> Result<PathBuf> {
         let cfg = config::load()?;
-        let window = capture::find_valorant_window()?;
+        let window = capture::find_game_window(game)?;
         let dir = cfg.recordings_dir()?;
         fs::create_dir_all(&dir)?;
         let now = chrono::Local::now();
         let video = dir.join(format!("{}.mp4", now.format("%Y-%m-%d %H-%M-%S")));
-        let recorder = Recorder::start(window, &video, cfg.record_settings())?;
+        let mut settings = cfg.record_settings();
+        if game != Game::Valorant {
+            // The game reports the events; there is no killfeed to watch.
+            settings.detect_region = None;
+        }
+        let recorder = Recorder::start(window, &video, settings)?;
         let info = MatchInfo {
+            game,
             map,
             mode,
             started_at: now.format("%Y-%m-%d %H:%M:%S").to_string(),
@@ -200,6 +226,7 @@ impl AutoRecorder {
         };
         info.save(&video)?;
         self.current = Some(ActiveMatch {
+            game,
             video: video.clone(),
             info,
             recorder,
@@ -265,6 +292,19 @@ fn send_cleanup(tx: &Sender<Notice>) {
     }
 }
 
+/// Adds an event the game itself reported, `ago` seconds before now.
+/// Events from before the recording started are dropped.
+fn add_reported_event(m: &mut ActiveMatch, kind: EventKind, ago: f64) -> Option<Notice> {
+    let t = m.recorder.elapsed()? - ago;
+    if t < 0.0 {
+        return None;
+    }
+    m.info.events.push(MatchEvent { t, kind });
+    m.info.events.sort_by(|a, b| a.t.total_cmp(&b.t));
+    let _ = m.info.save(&m.video);
+    Some(Notice::Event { kind, t })
+}
+
 fn detect(m: &mut ActiveMatch) -> Vec<Notice> {
     // Without a killfeed calibration the recorder captures no detection
     // frames and the match is only recorded.
@@ -311,6 +351,9 @@ const REANALYZE_FPS: u32 = 8;
 /// only. The events file as first recorded is kept as `.events.orig.json`.
 pub fn reanalyze(video: &Path, mut progress: impl FnMut(f64)) -> Result<MatchInfo> {
     let mut info = MatchInfo::load(video).ok_or_else(|| anyhow!("找不到這場錄影的事件檔"))?;
+    if info.game != Game::Valorant {
+        return Err(anyhow!("這場的擊殺／死亡／助攻是遊戲直接回報的,不需要重新偵測"));
+    }
     // The live events to merge with are always the ones first recorded.
     let original = video.with_extension("events.orig.json");
     let live: Vec<MatchEvent> = fs::read_to_string(&original)
@@ -408,7 +451,7 @@ fn stem(p: &Path) -> String {
 pub fn run() -> Result<()> {
     let cfg = config::load()?;
     if cfg.killfeed_region.is_none() {
-        return Err(anyhow!("還沒校準 killfeed 區域,請先執行校準。"));
+        println!("還沒校準 killfeed 區域:Valorant 對局只會錄影,不偵測擊殺(英雄聯盟不受影響)。");
     }
     println!("錄影資料夾: {}", cfg.recordings_dir()?.display());
     let mut auto = AutoRecorder::new()?;
@@ -416,7 +459,7 @@ pub fn run() -> Result<()> {
     let quit = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let quit2 = quit.clone();
     ctrlc::set_handler(move || quit2.store(true, std::sync::atomic::Ordering::Relaxed))?;
-    println!("等待 Valorant 對局開始...(會自動錄影,對局結束自動停止。按 Ctrl+C 結束)");
+    println!("等待 Valorant / 英雄聯盟對局開始...(會自動錄影,對局結束自動停止。按 Ctrl+C 結束)");
     loop {
         let quitting = quit.load(std::sync::atomic::Ordering::Relaxed);
         let notices = if quitting { auto.shutdown() } else { auto.tick() };

@@ -15,10 +15,26 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+
+use crate::session::EventKind;
+
+/// Which game a match is from.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Game {
+    #[default]
+    Valorant,
+    League,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum GameEvent {
     MatchStarted { map: String, mode: String },
+    /// One of your kills, deaths or assists, `ago` seconds before now. Only
+    /// games that report these themselves (League); Valorant's come from
+    /// the killfeed on screen.
+    Event { kind: EventKind, ago: f64 },
     /// The match is decided; the game stays in the match a few more seconds.
     MatchEnded,
     /// Back to the menus (after a match, or by leaving one).
@@ -238,7 +254,7 @@ fn mode_display_name(code: &str) -> String {
     name.to_string()
 }
 
-/// Modes not worth recording (practice).
+/// Modes not worth recording (practice, or watching someone else).
 pub fn is_practice(mode: &str) -> bool {
-    matches!(mode, "靶場" | "新手教學")
+    matches!(mode, "靶場" | "新手教學" | "練習工具" | "觀戰 / 重播")
 }

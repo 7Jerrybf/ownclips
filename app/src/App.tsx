@@ -152,7 +152,7 @@ function StatusCard({
         <span className={`dot ${calibrated ? "ok" : ""}`} /> {calibrated ? "待命中" : "需要設定"}
       </div>
       <div className="status-sub">
-        {calibrated ? "對局開始時會自動錄影" : "還沒校準 killfeed,錄影時不會偵測擊殺"}
+        {calibrated ? "Valorant / 英雄聯盟對局開始時會自動錄影" : "還沒校準 killfeed,Valorant 錄影時不會偵測擊殺"}
       </div>
       {!calibrated && (
         <button className="btn sm" onClick={onFix}>
