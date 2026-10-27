@@ -26,7 +26,8 @@
    - 點視窗裡的「**其他資訊**」
    - 再點下面出現的「**仍要執行**」
 3. 安裝畫面出現後，一路按「**Next**」（下一步）和「**Install**」（安裝），最後按「**Finish**」（完成）。
-   - 不需要系統管理員權限，也不需要重新開機。
+   - 程式會裝在 `C:\Program Files\OwnClips`，所以會跳出「**是否允許此 App 變更您的裝置？**」，按「**是**」。不需要重新開機。
+   - 以前裝過 0.5.0 或更早版本的話，安裝時會自動移除舊版，錄影和設定都會保留。
 
 ## 步驟 2：打開 OwnClips
 
@@ -84,7 +85,7 @@ OwnClips 不會修改遊戲、不讀取遊戲記憶體，只是像 OBS 一樣錄
 目前要。記得打遊戲前先打開 OwnClips。如果在對局進行中才打開，它也會馬上開始錄剩下的部分。
 
 **Q：有新版本時要怎麼更新？**
-OwnClips 啟動時（之後每隔幾小時）會自動檢查。有新版本時左下角會出現「**有新版本**」，按「**更新並重新開啟**」就會自動下載、安裝並重新打開，錄影和設定都會保留。錄影中不能更新，打完那場再按就好。也可以到「設定 → 關於」按「**檢查更新**」。（0.5.0 以前的版本沒有這個功能，要手動裝一次新版安裝檔。）
+OwnClips 啟動時（之後每隔幾小時）會自動檢查。有新版本時左下角會出現「**有新版本**」，按「**更新並重新開啟**」就會自動下載、安裝並重新打開（會跳出一次「是否允許此 App 變更您的裝置？」，按「是」），錄影和設定都會保留。錄影中不能更新，打完那場再按就好。也可以到「設定 → 關於」按「**檢查更新**」。（0.5.0 以前的版本沒有這個功能，要手動裝一次新版安裝檔。）
 
 ## 解除安裝
 
@@ -138,7 +139,7 @@ powershell -ExecutionPolicy Bypass -File app\scripts\release.ps1 -Notes "這版�
 
 腳本會問簽章私鑰的密碼，打包並簽章後上傳安裝檔、`.sig` 簽章檔和 `latest.json`，並刪掉 Release 上的舊版安裝檔。使用者的 app 會讀 `latest.json` 來發現新版本，並用 `tauri.conf.json` 裡的公鑰驗證安裝檔。私鑰放在 `%USERPROFILE%\.tauri\ownclips.key`，不進 git；**私鑰遺失的話，已安裝的使用者就收不到自動更新**，請另外備份。發佈前記得先升版本號（`app/package.json`、`app/package-lock.json`、`app/src-tauri/Cargo.toml`、`app/src-tauri/tauri.conf.json`），版本號沒變的話使用者不會收到更新。
 
-打包前會自動執行 `app/scripts/fetch-ffmpeg.ps1`，把 winget 裝的 ffmpeg 複製到 `app/src-tauri/resources/ffmpeg/`（檔案太大，不放進 git）；電腦上沒有的話會先用 winget 安裝。安裝檔也內嵌了 WebView2 安裝程式，並設定為只安裝給目前使用者（不需要系統管理員權限）。
+打包前會自動執行 `app/scripts/fetch-ffmpeg.ps1`，把 winget 裝的 ffmpeg 複製到 `app/src-tauri/resources/ffmpeg/`（檔案太大，不放進 git）；電腦上沒有的話會先用 winget 安裝。安裝檔也內嵌了 WebView2 安裝程式，並設定為安裝給所有使用者（`C:\Program Files\OwnClips`，需要系統管理員權限）。0.5.0 以前是裝在 `%LOCALAPPDATA%\OwnClips`，`app/src-tauri/installer-hooks.nsh` 會在安裝時移除那份舊版。
 
 ffmpeg 是 GPL 授權，授權檔會一起放進安裝檔；公開散布安裝檔時，也要提供 ffmpeg 原始碼的取得方式（例如連到 https://www.gyan.dev/ffmpeg/builds/ ）。
 

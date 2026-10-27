@@ -357,15 +357,31 @@ async fn encoder_name(codec: ownclips::recorder::VideoCodec) -> Option<String> {
         .flatten()
 }
 
+/// Moves recordings (with their events files) to the recycle bin in one go;
+/// a recording in progress is left alone. Returns how many were deleted.
 #[tauri::command]
-fn delete_match(video: String) -> CmdResult<()> {
-    let video = PathBuf::from(video);
-    for p in [MatchInfo::path_for(&video)] {
-        if p.exists() {
-            trash::delete(&p).map_err(err)?;
+async fn delete_matches(app: AppHandle, videos: Vec<String>) -> CmdResult<usize> {
+    let current = app.state::<Background>().status.lock().unwrap().video.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let videos: Vec<PathBuf> = videos
+            .into_iter()
+            .filter(|v| current.as_deref() != Some(v.as_str()))
+            .map(PathBuf::from)
+            .filter(|v| v.exists() && !is_mkv(v))
+            .collect();
+        let files: Vec<PathBuf> = videos
+            .iter()
+            .flat_map(|v| [MatchInfo::path_for(v), v.with_extension("events.orig.json"), v.clone()])
+            .filter(|p| p.exists())
+            .collect();
+        if !files.is_empty() {
+            trash::delete_all(&files).map_err(err)?;
         }
-    }
-    trash::delete(&video).map_err(err)
+        let _ = app.emit("library-changed", ());
+        Ok(videos.len())
+    })
+    .await
+    .map_err(err)?
 }
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -582,6 +598,13 @@ fn main() {
             if let Ok(dir) = app.path().resource_dir() {
                 ownclips::clip::set_bundled_ffmpeg(dir.join("ffmpeg").join("ffmpeg.exe"));
             }
+            // Autostart runs the exe at the path saved when it was turned
+            // on; save the current one in case the app moved (0.6 moved
+            // installs from %LOCALAPPDATA% to Program Files).
+            let launcher = app.autolaunch();
+            if launcher.is_enabled().unwrap_or(false) {
+                let _ = launcher.enable();
+            }
             let tray = build_tray(app.handle())?;
             app.manage(tray);
             let bg = start_background(app.handle().clone());
@@ -600,7 +623,7 @@ fn main() {
             ffmpeg_available,
             encoder_name,
             list_matches,
-            delete_match,
+            delete_matches,
             reveal,
             open_path,
             cut_range,

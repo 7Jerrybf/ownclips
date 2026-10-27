@@ -1051,3 +1051,51 @@ button {
 .dot.update {
   background: #60a5fa;
 }
+
+/* ---------- selecting matches ---------- */
+
+.select-bar {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.check {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  align-self: center;
+}
+.check .box {
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  border: 1.5px solid var(--border-strong);
+  background: rgba(10, 12, 18, 0.7);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  font-weight: 700;
+  line-height: 1;
+}
+.check:hover .box {
+  border-color: var(--muted);
+}
+.check.all .box,
+.check.some .box {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.card.picked {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}

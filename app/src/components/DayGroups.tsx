@@ -25,12 +25,15 @@ export function DayGroups<T>({
   items,
   startedAt,
   summary,
+  headStart,
   children,
 }: {
   items: T[];
   startedAt: (item: T) => string;
   /** Stats shown on the right of each day's heading. */
   summary: (items: T[]) => ReactNode;
+  /** Shown before each day's title (e.g. a select-the-whole-day box). */
+  headStart?: (items: T[]) => ReactNode;
   children: (item: T) => ReactNode;
 }) {
   const now = new Date();
@@ -41,6 +44,7 @@ export function DayGroups<T>({
         return (
           <section key={g.key} className="day-group">
             <div className="day-head">
+              {headStart?.(g.items)}
               <b>{label.title}</b>
               <span>{label.sub}</span>
               <span className="day-summary num">{summary(g.items)}</span>
