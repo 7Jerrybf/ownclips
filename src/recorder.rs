@@ -185,6 +185,11 @@ impl Recorder {
         }
     }
 
+    /// Whether ffmpeg quit by itself without an error: the window was closed.
+    pub fn window_closed(&mut self) -> bool {
+        matches!(self.ffmpeg.try_wait(), Ok(Some(status)) if status.success())
+    }
+
     /// Stops recording. The returned recording still has to be finished
     /// (muxed) with [`Stopped::finish`], which takes a while.
     pub fn stop(mut self) -> Result<Stopped> {

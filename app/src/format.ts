@@ -14,7 +14,7 @@ export function size(bytes: number): string {
   return `${Math.round(bytes / 1024 ** 2)} MB`;
 }
 
-export const gameLabel: Record<Game, string> = { valorant: "Valorant", league: "英雄聯盟" };
+export const gameLabel: Record<Game, string> = { valorant: "Valorant", league: "英雄聯盟", other: "其他" };
 
 export const kindLabel: Record<EventKind, string> = { kill: "擊殺", death: "死亡", assist: "助攻" };
 

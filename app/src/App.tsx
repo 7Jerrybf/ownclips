@@ -9,6 +9,7 @@ import { MatchesView } from "./components/MatchesView";
 import { SettingsView } from "./components/SettingsView";
 import { Toasts, type ToastItem } from "./components/Toasts";
 import { UpdateCard, useUpdates } from "./components/Update";
+import { WindowPicker } from "./components/WindowPicker";
 import { clock } from "./format";
 
 type Page = "matches" | "highlights" | "settings";
@@ -21,6 +22,7 @@ export default function App() {
   const [status, setStatus] = useState<RecorderStatus | null>(null);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const [calibrated, setCalibrated] = useState(true);
+  const [picking, setPicking] = useState(false);
   const nextId = useRef(1);
 
   const notify = useCallback((message: string, kind: Toast["kind"] = "info") => {
@@ -85,7 +87,13 @@ export default function App() {
         </button>
         <div className="sidebar-spacer" />
         <UpdateCard updates={updates} recording={status?.state === "recording"} />
-        <StatusCard status={status} calibrated={calibrated} onFix={() => go("settings")} />
+        <StatusCard
+          status={status}
+          calibrated={calibrated}
+          onFix={() => go("settings")}
+          onRecord={() => setPicking(true)}
+          notify={notify}
+        />
       </aside>
 
       <main className="main">
@@ -111,6 +119,16 @@ export default function App() {
         ) : null}
         {!open && page === "settings" && <SettingsView notify={notify} onSaved={refresh} updates={updates} />}
       </main>
+      {picking && (
+        <WindowPicker
+          notify={notify}
+          onClose={() => setPicking(false)}
+          onPick={(w) => {
+            setPicking(false);
+            api.startManual(w.hwnd).catch((e) => notify(String(e), "error"));
+          }}
+        />
+      )}
       <Toasts items={toasts} />
     </div>
   );
@@ -120,10 +138,14 @@ function StatusCard({
   status,
   calibrated,
   onFix,
+  onRecord,
+  notify,
 }: {
   status: RecorderStatus | null;
   calibrated: boolean;
   onFix: () => void;
+  onRecord: () => void;
+  notify: (message: string, kind?: Toast["kind"]) => void;
 }) {
   const [, tick] = useState(0);
   useEffect(() => {
@@ -131,8 +153,35 @@ function StatusCard({
     return () => clearInterval(t);
   }, []);
 
+  // Stopping takes a moment; it's over once the status moves on.
+  const [stopping, setStopping] = useState(false);
+  useEffect(() => setStopping(false), [status?.video]);
+
   if (status?.state === "recording") {
     const elapsed = status.started_at ? (Date.now() - status.started_at) / 1000 : 0;
+    if (status.manual) {
+      return (
+        <div className="status-card recording">
+          <div className="status-head">
+            <span className="dot live" /> 手動錄影中 <span className="num" style={{ marginLeft: "auto" }}>{clock(elapsed)}</span>
+          </div>
+          <div className="status-sub">{status.map}</div>
+          <button
+            className="btn sm danger"
+            disabled={stopping}
+            onClick={() => {
+              setStopping(true);
+              api.stopManual().catch((e) => {
+                setStopping(false);
+                notify(String(e), "error");
+              });
+            }}
+          >
+            {stopping ? "停止中…" : "停止錄影"}
+          </button>
+        </div>
+      );
+    }
     return (
       <div className="status-card recording">
         <div className="status-head">
@@ -162,6 +211,9 @@ function StatusCard({
           前往校準
         </button>
       )}
+      <button className="btn sm" disabled={!status} onClick={onRecord}>
+        手動錄影
+      </button>
     </div>
   );
 }

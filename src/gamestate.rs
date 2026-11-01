@@ -26,6 +26,8 @@ pub enum Game {
     #[default]
     Valorant,
     League,
+    /// Recorded by hand from any window: nothing reports events or its end.
+    Other,
 }
 
 #[derive(Debug, Clone, PartialEq)]

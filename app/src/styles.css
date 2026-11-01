@@ -180,6 +180,7 @@ button {
 .status-sub {
   color: var(--muted);
   font-size: 12px;
+  overflow-wrap: anywhere;
 }
 .status-kd {
   display: flex;
@@ -414,6 +415,10 @@ button {
   font-size: 12px;
 }
 .map-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 22px;
   font-weight: 800;
   letter-spacing: 0.5px;
@@ -949,6 +954,46 @@ button {
   align-items: center;
   gap: 8px;
   padding: 12px 14px;
+}
+.modal.window-picker {
+  width: min(560px, 92vw);
+}
+.window-list {
+  display: flex;
+  flex-direction: column;
+  max-height: 50vh;
+  overflow-y: auto;
+  padding: 0 8px;
+}
+.window-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 9px 10px;
+  text-align: left;
+  color: var(--text);
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.window-item:hover {
+  background: var(--panel-3);
+}
+.window-title,
+.window-process {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.window-process {
+  color: var(--faint);
+  font-size: 12px;
+}
+.window-hint {
+  padding: 12px 18px;
+  color: var(--muted);
+  font-size: 12px;
 }
 @keyframes fade {
   from {

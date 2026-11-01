@@ -1,6 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
+use serde::Serialize;
 use windows_capture::capture::{CaptureControl, Context, GraphicsCaptureApiHandler};
 use windows_capture::frame::Frame;
 use windows_capture::graphics_capture_api::InternalCaptureControl;
@@ -121,7 +122,48 @@ pub fn find_game_window(game: Game) -> Result<Window> {
         // The match itself, not the lobby client ("League of Legends").
         Game::League => Window::from_contains_name("League of Legends (TM) Client")
             .map_err(|e| anyhow!("找不到英雄聯盟的遊戲視窗: {e}")),
+        Game::Other => Err(anyhow!("手動錄影要自己選視窗")),
     }
+}
+
+/// A window that can be recorded by hand.
+#[derive(Serialize, Clone, Debug)]
+pub struct WindowInfo {
+    pub hwnd: usize,
+    pub title: String,
+    pub process: String,
+}
+
+#[link(name = "dwmapi")]
+extern "system" {
+    fn DwmGetWindowAttribute(hwnd: *mut std::ffi::c_void, attribute: u32, value: *mut u32, size: u32) -> i32;
+}
+
+const DWMWA_CLOAKED: u32 = 14;
+
+/// Cloaked windows count as visible but aren't shown, like the suspended
+/// background windows of Windows' own apps.
+fn is_cloaked(window: &Window) -> bool {
+    let mut cloaked = 0u32;
+    let hr = unsafe { DwmGetWindowAttribute(window.as_raw_hwnd(), DWMWA_CLOAKED, &mut cloaked, 4) };
+    hr == 0 && cloaked != 0
+}
+
+/// The windows that can be recorded, front to back: not our own, not
+/// cloaked, and not minimized ones (they sit at -32000 and deliver no frames).
+pub fn list_windows() -> Result<Vec<WindowInfo>> {
+    let own_pid = std::process::id();
+    let windows = Window::enumerate().map_err(|e| anyhow!("列出視窗失敗: {e}"))?;
+    Ok(windows
+        .into_iter()
+        .filter_map(|w| {
+            let title = w.title().ok().filter(|t| !t.trim().is_empty() && t != "Program Manager")?;
+            if w.process_id().ok()? == own_pid || w.rect().ok()?.left <= -32000 || is_cloaked(&w) {
+                return None;
+            }
+            Some(WindowInfo { hwnd: w.as_raw_hwnd() as usize, title, process: w.process_name().unwrap_or_default() })
+        })
+        .collect())
 }
 
 /// Starts a background capture of `window` and returns a handle to stop it

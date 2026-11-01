@@ -9,7 +9,8 @@
 //
 // `AutoRecorder::tick` drives everything, so the same logic can run from
 // the command line or from the app's background thread. `reanalyze` runs
-// the detector again over a finished recording.
+// the detector again over a finished recording. `start_manual` records any
+// window on request instead, until `stop_manual`; game events don't touch it.
 use std::fs;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -20,6 +21,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
+use windows_capture::window::Window;
 
 use crate::capture;
 use crate::clip;
@@ -35,6 +37,10 @@ use crate::storage;
 const END_TAIL: Duration = Duration::from_secs(6);
 /// Shorter recordings without any event are discarded as false starts.
 const MIN_MATCH_SECONDS: f64 = 20.0;
+/// The `mode` of recordings made by hand.
+const MANUAL_MODE: &str = "手動錄影";
+/// Window titles (a manual recording's `map`) are cut to this many characters.
+const MAX_TITLE_CHARS: usize = 40;
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -87,7 +93,7 @@ impl MatchInfo {
 /// What the auto recorder reports as it goes.
 #[derive(Debug, Clone)]
 pub enum Notice {
-    Started { video: PathBuf, map: String, mode: String },
+    Started { video: PathBuf, map: String, mode: String, manual: bool },
     Event { kind: EventKind, t: f64 },
     /// Recording stopped; the final file is being put together.
     Processing { video: PathBuf },
@@ -171,8 +177,10 @@ impl AutoRecorder {
                         notices.push(Notice::Skipped { reason: format!("{mode}不錄影") });
                         continue;
                     }
-                    match self.start_match(game, map.clone(), mode.clone()) {
-                        Ok(video) => notices.push(Notice::Started { video, map, mode }),
+                    let started = capture::find_game_window(game)
+                        .and_then(|window| self.start_match(game, window, map.clone(), mode.clone()));
+                    match started {
+                        Ok(video) => notices.push(Notice::Started { video, map, mode, manual: false }),
                         Err(e) => notices.push(Notice::Error(format!("開始錄影失敗: {e:#}"))),
                     }
                 }
@@ -192,7 +200,9 @@ impl AutoRecorder {
 
         if let Some(m) = &mut self.current {
             notices.extend(detect(m));
-            if let Some(e) = m.recorder.error() {
+            if m.game == Game::Other && m.recorder.window_closed() {
+                notices.extend(self.finish_match());
+            } else if let Some(e) = m.recorder.error() {
                 notices.push(Notice::Error(format!("錄影發生錯誤: {e}")));
                 notices.extend(self.finish_match());
             } else if m.stop_at.is_some_and(|t| Instant::now() >= t) {
@@ -202,9 +212,32 @@ impl AutoRecorder {
         notices
     }
 
-    fn start_match(&mut self, game: Game, map: String, mode: String) -> Result<PathBuf> {
+    /// Starts recording the window `hwnd` by hand; only `stop_manual` (or the
+    /// window closing) ends it. Refused while a match is being recorded.
+    pub fn start_manual(&mut self, hwnd: usize) -> Vec<Notice> {
+        if self.current.is_some() {
+            return vec![Notice::Error("已經在錄影中,先結束目前的錄影".to_string())];
+        }
+        let window = Window::from_raw_hwnd(hwnd as *mut std::ffi::c_void);
+        let map: String = window.title().unwrap_or_default().chars().take(MAX_TITLE_CHARS).collect();
+        let mode = MANUAL_MODE.to_string();
+        match self.start_match(Game::Other, window, map.clone(), mode.clone()) {
+            Ok(video) => vec![Notice::Started { video, map, mode, manual: true }],
+            Err(e) => vec![Notice::Error(format!("開始錄影失敗: {e:#}"))],
+        }
+    }
+
+    /// Ends a manual recording; an automatic one keeps going.
+    pub fn stop_manual(&mut self) -> Vec<Notice> {
+        if self.current.as_ref().is_some_and(|m| m.game == Game::Other) {
+            self.finish_match()
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn start_match(&mut self, game: Game, window: Window, map: String, mode: String) -> Result<PathBuf> {
         let cfg = config::load()?;
-        let window = capture::find_game_window(game)?;
         let dir = cfg.recordings_dir()?;
         fs::create_dir_all(&dir)?;
         let now = chrono::Local::now();
@@ -246,8 +279,10 @@ impl AutoRecorder {
             Ok(s) => s,
             Err(e) => return vec![Notice::Error(format!("{e:#}"))],
         };
-        // A few seconds with nothing in it is a false start, not a match.
-        if m.info.duration.is_none_or(|d| d < MIN_MATCH_SECONDS) && m.info.events.is_empty() {
+        // A few seconds with nothing in it is a false start, not a match. A
+        // short manual recording was asked for, but without frames there's no video.
+        let min_seconds = if m.game == Game::Other { 0.0 } else { MIN_MATCH_SECONDS };
+        if m.info.duration.is_none_or(|d| d < min_seconds) && m.info.events.is_empty() {
             stopped.discard();
             let _ = fs::remove_file(MatchInfo::path_for(&m.video));
             return vec![Notice::Skipped { reason: "錄影太短,已捨棄".to_string() }];
@@ -465,7 +500,7 @@ pub fn run() -> Result<()> {
         let notices = if quitting { auto.shutdown() } else { auto.tick() };
         for n in notices {
             match n {
-                Notice::Started { video, map, mode } => println!("對局開始 [{mode} / {map}],錄影中: {}", video.display()),
+                Notice::Started { video, map, mode, .. } => println!("對局開始 [{mode} / {map}],錄影中: {}", video.display()),
                 Notice::Event { kind, t } => {
                     let what = match kind {
                         EventKind::Kill => "擊殺",

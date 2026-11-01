@@ -10,6 +10,7 @@ use std::os::windows::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -38,6 +39,8 @@ fn err(e: impl std::fmt::Display) -> String {
 struct RecorderStatus {
     /// "waiting" | "recording"
     state: String,
+    /// The recording was started by hand and ends the same way.
+    manual: bool,
     map: Option<String>,
     mode: Option<String>,
     video: Option<String>,
@@ -55,15 +58,23 @@ struct Toast {
     message: String,
 }
 
+/// What the UI asks of the auto recorder, which lives on its own thread.
+enum Request {
+    StartManual { hwnd: usize },
+    StopManual,
+}
+
 struct Background {
     status: Arc<Mutex<RecorderStatus>>,
     stop: Arc<AtomicBool>,
+    requests: Sender<Request>,
     thread: Mutex<Option<JoinHandle<()>>>,
 }
 
 fn start_background(app: AppHandle) -> Background {
     let status = Arc::new(Mutex::new(RecorderStatus { state: "waiting".into(), ..Default::default() }));
     let stop = Arc::new(AtomicBool::new(false));
+    let (requests, incoming) = mpsc::channel();
     let (status2, stop2) = (status.clone(), stop.clone());
     let thread = thread::spawn(move || {
         let mut auto = match AutoRecorder::new() {
@@ -83,10 +94,37 @@ fn start_background(app: AppHandle) -> Background {
             if stopping {
                 return;
             }
-            thread::sleep(Duration::from_millis(if auto.is_recording() { 150 } else { 1000 }));
+            sync_idle(&app, &status2, auto.is_recording());
+            // A request ends the wait early, so buttons respond right away.
+            let wait = Duration::from_millis(if auto.is_recording() { 150 } else { 1000 });
+            if let Ok(request) = incoming.recv_timeout(wait) {
+                let notices = match request {
+                    Request::StartManual { hwnd } => auto.start_manual(hwnd),
+                    Request::StopManual => auto.stop_manual(),
+                };
+                for n in notices {
+                    apply_notice(&app, &status2, n);
+                }
+                sync_idle(&app, &status2, auto.is_recording());
+            }
         }
     });
-    Background { status, stop, thread: Mutex::new(Some(thread)) }
+    Background { status, stop, requests, thread: Mutex::new(Some(thread)) }
+}
+
+/// A recording can end without a notice saying so (discarded as a false
+/// start, or failing to stop): don't keep showing it as recording.
+fn sync_idle(app: &AppHandle, status: &Mutex<RecorderStatus>, recording: bool) {
+    let current = {
+        let mut s = status.lock().unwrap();
+        if recording || s.state != "recording" {
+            return;
+        }
+        *s = RecorderStatus { state: "waiting".into(), ..Default::default() };
+        s.clone()
+    };
+    update_tray(app, &current);
+    let _ = app.emit("recorder-status", current);
 }
 
 /// Stops the auto recorder, finishing a recording in progress so the file
@@ -104,16 +142,18 @@ fn apply_notice(app: &AppHandle, status: &Mutex<RecorderStatus>, notice: Notice)
     let toast = {
         let mut s = status.lock().unwrap();
         match notice {
-            Notice::Started { video, map, mode } => {
+            Notice::Started { video, map, mode, manual } => {
                 *s = RecorderStatus {
                     state: "recording".into(),
+                    manual,
                     map: Some(map.clone()),
                     mode: Some(mode.clone()),
                     video: Some(video.to_string_lossy().into_owned()),
                     started_at: Some(now_ms()),
                     ..Default::default()
                 };
-                Some(Toast { kind: "start".into(), message: format!("對局開始,錄影中 · {mode} · {map}") })
+                let message = if manual { format!("手動錄影中 · {map}") } else { format!("對局開始,錄影中 · {mode} · {map}") };
+                Some(Toast { kind: "start".into(), message })
             }
             Notice::Event { kind, .. } => {
                 match kind {
@@ -126,17 +166,18 @@ fn apply_notice(app: &AppHandle, status: &Mutex<RecorderStatus>, notice: Notice)
             Notice::Processing { .. } => {
                 *s = RecorderStatus { state: "waiting".into(), ..Default::default() };
                 let _ = app.emit("library-changed", ());
-                Some(Toast { kind: "info".into(), message: "對局結束,正在合成錄影檔…".into() })
+                Some(Toast { kind: "info".into(), message: "錄影結束,正在合成錄影檔…".into() })
             }
             Notice::Recovered { video } => {
                 let _ = app.emit("library-changed", ());
                 let name = video.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 Some(Toast { kind: "success".into(), message: format!("已救回上次未完成的錄影 {name}") })
             }
+            // Muxing finishes in the background: the next recording may
+            // already be running, so this must not touch the status.
             Notice::Stopped { .. } => {
-                *s = RecorderStatus { state: "waiting".into(), ..Default::default() };
                 let _ = app.emit("library-changed", ());
-                Some(Toast { kind: "stop".into(), message: "錄影已存檔,精華區間已標好".into() })
+                Some(Toast { kind: "stop".into(), message: "錄影已存檔".into() })
             }
             Notice::Cleaned { deleted, freed } => {
                 let _ = app.emit("library-changed", ());
@@ -246,7 +287,9 @@ fn build_tray(app: &AppHandle) -> tauri::Result<Tray> {
 fn update_tray(app: &AppHandle, s: &RecorderStatus) {
     let Some(tray) = app.try_state::<Tray>() else { return };
     let recording = s.state == "recording";
-    let text = if recording {
+    let text = if recording && s.manual {
+        format!("手動錄影中 · {}", s.map.as_deref().unwrap_or("?"))
+    } else if recording {
         format!(
             "錄影中 · {} · {}  {}/{}/{}",
             s.mode.as_deref().unwrap_or("?"),
@@ -277,6 +320,24 @@ fn set_autostart(app: AppHandle, enabled: bool) -> CmdResult<()> {
 #[tauri::command]
 fn get_status(bg: State<Background>) -> RecorderStatus {
     bg.status.lock().unwrap().clone()
+}
+
+// ---------- manual recording ----------
+
+#[tauri::command]
+async fn list_windows() -> CmdResult<Vec<ownclips::capture::WindowInfo>> {
+    tauri::async_runtime::spawn_blocking(|| ownclips::capture::list_windows().map_err(err)).await.map_err(err)?
+}
+
+/// Results arrive like those of automatic recordings: "recorder-status" and "toast" events.
+#[tauri::command]
+fn start_manual_recording(bg: State<Background>, hwnd: usize) -> CmdResult<()> {
+    bg.requests.send(Request::StartManual { hwnd }).map_err(err)
+}
+
+#[tauri::command]
+fn stop_manual_recording(bg: State<Background>) -> CmdResult<()> {
+    bg.requests.send(Request::StopManual).map_err(err)
 }
 
 // ---------- settings ----------
@@ -497,7 +558,7 @@ fn recording(app: &AppHandle) -> bool {
 /// starts the new version. Never while recording.
 #[tauri::command]
 async fn install_update(app: AppHandle) -> CmdResult<()> {
-    const BUSY: &str = "錄影中不能更新,對局結束後再試";
+    const BUSY: &str = "錄影中不能更新,錄影結束後再試";
     if recording(&app) {
         return Err(BUSY.into());
     }
@@ -617,6 +678,9 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             get_status,
+            list_windows,
+            start_manual_recording,
+            stop_manual_recording,
             get_config,
             save_config,
             recordings_dir,
