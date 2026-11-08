@@ -39,6 +39,8 @@ pub struct Config {
     pub close_to_tray: bool,
     /// Size limit of the recordings folder in GB; None keeps everything.
     pub storage_limit_gb: Option<u32>,
+    /// Global shortcut that starts and stops manual recording; None turns it off.
+    pub manual_hotkey: Option<String>,
 }
 
 /// Where the killfeed sits with Valorant's default HUD on a 16:9 screen
@@ -59,6 +61,7 @@ impl Default for Config {
             video_bitrate_mbps: 20,
             close_to_tray: true,
             storage_limit_gb: None,
+            manual_hotkey: Some("Ctrl+Alt+F9".to_string()),
         }
     }
 }

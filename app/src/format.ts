@@ -18,6 +18,9 @@ export const gameLabel: Record<Game, string> = { valorant: "Valorant", league: "
 
 export const kindLabel: Record<EventKind, string> = { kill: "擊殺", death: "死亡", assist: "助攻" };
 
+/** "Ctrl+Alt+KeyR" -> "Ctrl+Alt+R", "Ctrl+Digit1" -> "Ctrl+1". */
+export const hotkeyLabel = (hotkey: string) => hotkey.replace(/(Key|Digit)(\w)$/, "$2");
+
 export function count(events: MatchEvent[], kind: EventKind): number {
   return events.filter((e) => e.kind === kind).length;
 }

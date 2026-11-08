@@ -14,11 +14,14 @@ import {
   IconFolder,
   IconKeep,
   IconKill,
+  IconMarkIn,
+  IconMarkOut,
   IconNext,
   IconPlay,
   IconPrev,
   IconScissors,
 } from "./Icons";
+import { Player, SKIP, SPEEDS } from "./Player";
 import { Timeline } from "./Timeline";
 
 const LEAD_IN = 3;
@@ -106,6 +109,33 @@ export function MatchDetail({
     if (play) void v.play();
   }, []);
 
+  const skip = useCallback(
+    (seconds: number) => {
+      const v = video.current;
+      if (!v) return;
+      const end = Number.isFinite(v.duration) ? v.duration : duration;
+      seek(Math.min(end, Math.max(0, v.currentTime + seconds)), !v.paused);
+    },
+    [duration, seek],
+  );
+
+  const [speed, setSpeed] = useState(() => {
+    try {
+      const s = Number(localStorage.getItem("playback-speed"));
+      return SPEEDS.includes(s) ? s : 1;
+    } catch {
+      return 1;
+    }
+  });
+  const changeSpeed = useCallback((s: number) => {
+    setSpeed(s);
+    try {
+      localStorage.setItem("playback-speed", String(s));
+    } catch {
+      // Not remembered; fine.
+    }
+  }, []);
+
   const playHighlight = useCallback(
     (h: { start: number; end: number }) => {
       playingRange.current = [h.start, h.end];
@@ -133,10 +163,12 @@ export function MatchDetail({
       if (tag === "INPUT") return;
       const v = video.current;
       if (!v) return;
-      // The focused <video> already handles Space itself.
-      if (e.key === " " && (tag === "VIDEO" || tag === "BUTTON")) return;
-      if (e.key === "ArrowRight") seek(Math.min(duration, v.currentTime + 5), !v.paused);
-      else if (e.key === "ArrowLeft") seek(Math.max(0, v.currentTime - 5), !v.paused);
+      // A focused button already handles Space itself.
+      if (e.key === " " && tag === "BUTTON") return;
+      if (e.key === "ArrowRight") skip(SKIP);
+      else if (e.key === "ArrowLeft") skip(-SKIP);
+      else if (e.key === ">") changeSpeed(SPEEDS[Math.min(SPEEDS.length - 1, SPEEDS.indexOf(speed) + 1)]);
+      else if (e.key === "<") changeSpeed(SPEEDS[Math.max(0, SPEEDS.indexOf(speed) - 1)]);
       else if (e.key === ".") jump(1);
       else if (e.key === ",") jump(-1);
       else if (e.key === "i") setRange([v.currentTime, null]);
@@ -147,7 +179,7 @@ export function MatchDetail({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [duration, jump, seek]);
+  }, [jump, skip, speed, changeSpeed]);
 
   async function exportRange(start: number, end: number) {
     setBusy(true);
@@ -207,91 +239,115 @@ export function MatchDetail({
 
       <div className="viewer">
         <div>
-          <div className="player-wrap">
-            <video
-              ref={video}
-              src={fileUrl(match.video)}
-              controls
-              onLoadedMetadata={(e) => {
-                setDuration(e.currentTarget.duration);
-                if (initialRange) seek(initialRange[0]);
-              }}
-              onSeeking={(e) => {
-                // A manual seek outside the range ends "play this highlight".
-                const t = e.currentTarget.currentTime;
-                const r = playingRange.current;
-                if (r && (t < r[0] - 0.5 || t > r[1])) playingRange.current = null;
-              }}
-            />
-          </div>
-
-          <div className="timeline-panel">
-            <Timeline
-              duration={duration}
-              current={current}
-              events={events}
-              range={range}
-              bands={ranges.map((h, i) => ({ start: h.start, end: h.end, active: i === activeHighlight }))}
-              onSeek={(t) => {
-                playingRange.current = null;
-                seek(t);
-              }}
-            />
-            <div className="timeline-foot">
-              <button className="btn sm" onClick={() => jump(-1)} title="上一個事件 ( , )">
-                <IconPrev size={14} /> 上一個
-              </button>
-              <button className="btn sm" onClick={() => jump(1)} title="下一個事件 ( . )">
-                下一個 <IconNext size={14} />
-              </button>
-              <span className="num" style={{ margin: "0 6px", color: "var(--muted)" }}>
-                {clock(current)} / {clock(duration)}
-              </span>
-              <div className="legend">
-                <span>
-                  <i style={{ background: "var(--kill)" }} />
-                  擊殺
-                </span>
-                <span>
-                  <i style={{ background: "var(--death)" }} />
-                  死亡
-                </span>
-                <span>
-                  <i style={{ background: "var(--assist)" }} />
-                  助攻
-                </span>
-                <span>
-                  <i style={{ background: "rgba(255, 201, 64, 0.35)" }} />
-                  精華
-                </span>
-              </div>
-            </div>
-            <div className="timeline-foot" style={{ marginTop: 10 }}>
-              <button className="btn sm" onClick={() => setRange([current, null])} title="設為起點 ( I )">
-                設為起點 {rin !== null && <span className="num">{clock(rin)}</span>}
-              </button>
-              <button className="btn sm" onClick={() => setRange(([s]) => [s ?? 0, current])} title="設為終點 ( O )">
-                設為終點 {rout !== null && <span className="num">{clock(rout)}</span>}
-              </button>
-              <button
-                className="btn sm"
-                disabled={busy || rin === null || rout === null || rout <= rin}
-                onClick={() => rin !== null && rout !== null && exportRange(rin, rout)}
-              >
-                <IconScissors size={14} /> 匯出這段
-              </button>
-              {rin !== null && (
-                <button className="btn sm ghost" onClick={() => setRange([null, null])}>
-                  清除
+          <Player
+            videoRef={video}
+            src={fileUrl(match.video)}
+            current={current}
+            duration={duration}
+            speed={speed}
+            onSpeed={changeSpeed}
+            onSkip={skip}
+            onLoadedMetadata={(e) => {
+              setDuration(e.currentTarget.duration);
+              if (initialRange) seek(initialRange[0]);
+            }}
+            onSeeking={(e) => {
+              // A manual seek outside the range ends "play this highlight".
+              const t = e.currentTarget.currentTime;
+              const r = playingRange.current;
+              if (r && (t < r[0] - 0.5 || t > r[1])) playingRange.current = null;
+            }}
+            timeline={
+              <Timeline
+                duration={duration}
+                current={current}
+                events={events}
+                range={range}
+                bands={ranges.map((h, i) => ({ start: h.start, end: h.end, active: i === activeHighlight }))}
+                onSeek={(t) => {
+                  playingRange.current = null;
+                  seek(t);
+                }}
+                onRangeChange={(r, t) => {
+                  setRange(r);
+                  // Preview the frame at the edge being dragged.
+                  const v = video.current;
+                  if (!v) return;
+                  playingRange.current = null;
+                  v.pause();
+                  v.currentTime = t;
+                }}
+              />
+            }
+            navTools={
+              <>
+                <span className="player-sep" />
+                <button className="player-btn" onClick={() => jump(-1)} title="上一個事件 ( , )">
+                  <IconPrev size={17} />
                 </button>
-              )}
-              <span style={{ marginLeft: "auto", color: "var(--faint)", fontSize: 12 }}>
-                <span className="kbd">Space</span>播放 <span className="kbd">←</span>
-                <span className="kbd">→</span>5 秒 <span className="kbd">,</span>
-                <span className="kbd">.</span>跳事件 <span className="kbd">I</span>
-                <span className="kbd">O</span>起終點
+                <button className="player-btn" onClick={() => jump(1)} title="下一個事件 ( . )">
+                  <IconNext size={17} />
+                </button>
+              </>
+            }
+            editTools={
+              <>
+                <button className="player-btn text" onClick={() => setRange([current, null])} title="設為起點 ( I )">
+                  <IconMarkIn size={16} />
+                  {rin !== null ? <span className="num">{clock(rin)}</span> : "起點"}
+                </button>
+                <button
+                  className="player-btn text"
+                  onClick={() => setRange(([s]) => [s ?? 0, current])}
+                  title="設為終點 ( O )"
+                >
+                  <IconMarkOut size={16} />
+                  {rout !== null ? <span className="num">{clock(rout)}</span> : "終點"}
+                </button>
+                <button
+                  className="player-btn text"
+                  disabled={busy || rin === null || rout === null || rout <= rin}
+                  onClick={() => rin !== null && rout !== null && exportRange(rin, rout)}
+                  title="把選取的這段存成影片檔"
+                >
+                  <IconScissors size={16} /> 匯出
+                </button>
+                {rin !== null && (
+                  <button className="player-btn text" onClick={() => setRange([null, null])} title="清除起終點">
+                    清除
+                  </button>
+                )}
+                <span className="player-sep" />
+              </>
+            }
+          />
+
+          <div className="player-hint">
+            <div className="legend">
+              <span>
+                <i style={{ background: "var(--kill)" }} />
+                擊殺
+              </span>
+              <span>
+                <i style={{ background: "var(--death)" }} />
+                死亡
+              </span>
+              <span>
+                <i style={{ background: "var(--assist)" }} />
+                助攻
+              </span>
+              <span>
+                <i style={{ background: "rgba(255, 201, 64, 0.35)" }} />
+                精華
               </span>
             </div>
+            <span>
+              <span className="kbd">Space</span>播放 <span className="kbd">←</span>
+              <span className="kbd">→</span>5 秒 <span className="kbd">,</span>
+              <span className="kbd">.</span>跳事件 <span className="kbd">&lt;</span>
+              <span className="kbd">&gt;</span>倍速 <span className="kbd">F</span>全螢幕 <span className="kbd">I</span>
+              <span className="kbd">O</span>起終點 · 拖曳把手微調
+            </span>
           </div>
 
           <div className="page-head" style={{ marginTop: 28, marginBottom: 14 }}>

@@ -10,7 +10,7 @@ import { SettingsView } from "./components/SettingsView";
 import { Toasts, type ToastItem } from "./components/Toasts";
 import { UpdateCard, useUpdates } from "./components/Update";
 import { WindowPicker } from "./components/WindowPicker";
-import { clock } from "./format";
+import { clock, hotkeyLabel } from "./format";
 
 type Page = "matches" | "highlights" | "settings";
 
@@ -23,6 +23,7 @@ export default function App() {
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const [calibrated, setCalibrated] = useState(true);
   const [picking, setPicking] = useState(false);
+  const [hotkey, setHotkey] = useState<string | null>(null);
   const nextId = useRef(1);
 
   const notify = useCallback((message: string, kind: Toast["kind"] = "info") => {
@@ -36,6 +37,7 @@ export default function App() {
     api.listMatches().then(setMatches).catch((e) => notify(String(e), "error"));
     api.getConfig().then((c) => {
       setCalibrated(!!c.killfeed_region);
+      setHotkey(c.manual_hotkey);
       setClipSecs([c.clip_pre_seconds, c.clip_post_seconds]);
     });
   }, [notify]);
@@ -43,6 +45,7 @@ export default function App() {
   useEffect(() => {
     refresh();
     api.status().then(setStatus);
+    api.hotkeyError().then((e) => e && notify(e, "error"));
     const unlisten = [
       listen<RecorderStatus>("recorder-status", (e) => {
         setStatus(e.payload);
@@ -90,6 +93,7 @@ export default function App() {
         <StatusCard
           status={status}
           calibrated={calibrated}
+          hotkey={hotkey}
           onFix={() => go("settings")}
           onRecord={() => setPicking(true)}
           notify={notify}
@@ -137,12 +141,14 @@ export default function App() {
 function StatusCard({
   status,
   calibrated,
+  hotkey,
   onFix,
   onRecord,
   notify,
 }: {
   status: RecorderStatus | null;
   calibrated: boolean;
+  hotkey: string | null;
   onFix: () => void;
   onRecord: () => void;
   notify: (message: string, kind?: Toast["kind"]) => void;
@@ -177,7 +183,7 @@ function StatusCard({
               });
             }}
           >
-            {stopping ? "停止中…" : "停止錄影"}
+            {stopping ? "停止中…" : hotkey ? `停止錄影 (${hotkeyLabel(hotkey)})` : "停止錄影"}
           </button>
         </div>
       );
@@ -211,8 +217,13 @@ function StatusCard({
           前往校準
         </button>
       )}
-      <button className="btn sm" disabled={!status} onClick={onRecord}>
-        手動錄影
+      <button
+        className="btn sm"
+        disabled={!status}
+        onClick={onRecord}
+        title={hotkey ? `在任何視窗按 ${hotkeyLabel(hotkey)} 可以直接錄那個視窗` : undefined}
+      >
+        手動錄影{hotkey && ` (${hotkeyLabel(hotkey)})`}
       </button>
     </div>
   );

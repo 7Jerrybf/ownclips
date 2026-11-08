@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use base64::Engine as _;
 use ownclips::clip;
@@ -25,6 +25,7 @@ use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WindowEvent, Wry};
 use tauri_plugin_autostart::ManagerExt as _;
+use tauri_plugin_global_shortcut::{GlobalShortcutExt as _, ShortcutState};
 use tauri_plugin_updater::UpdaterExt as _;
 
 type CmdResult<T> = Result<T, String>;
@@ -340,6 +341,76 @@ fn stop_manual_recording(bg: State<Background>) -> CmdResult<()> {
     bg.requests.send(Request::StopManual).map_err(err)
 }
 
+/// A small image of a window for the picker; None if it can't be captured.
+#[tauri::command]
+async fn window_preview(hwnd: usize) -> Option<String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let img = ownclips::capture::window_thumbnail(hwnd, 400).ok()?;
+        jpeg_data_url(&img, 75).ok()
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+fn jpeg_data_url(img: &image::RgbImage, quality: u8) -> Result<String, String> {
+    let mut jpeg = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut Cursor::new(&mut jpeg), quality)
+        .encode_image(img)
+        .map_err(err)?;
+    Ok(format!("data:image/jpeg;base64,{}", base64::engine::general_purpose::STANDARD.encode(jpeg)))
+}
+
+/// The hotkey: stops a manual recording, otherwise records the window in
+/// front, so it works from inside a fullscreen game.
+fn toggle_manual(app: &AppHandle) {
+    let bg = app.state::<Background>();
+    let manual = {
+        let s = bg.status.lock().unwrap();
+        s.state == "recording" && s.manual
+    };
+    let request = if manual {
+        Request::StopManual
+    } else if let Some(w) = ownclips::capture::foreground_window() {
+        Request::StartManual { hwnd: w.hwnd }
+    } else {
+        let message = "這個視窗不能錄影,切到要錄的視窗再按快捷鍵".to_string();
+        let _ = app.emit("toast", Toast { kind: "error".into(), message });
+        return;
+    };
+    let _ = bg.requests.send(request);
+}
+
+fn apply_hotkey(app: &AppHandle, hotkey: Option<&str>) -> CmdResult<()> {
+    let shortcuts = app.global_shortcut();
+    shortcuts.unregister_all().map_err(err)?;
+    if let Some(h) = hotkey {
+        shortcuts.register(h).map_err(|e| format!("無法設定快捷鍵 {h},可能被其他程式佔用了: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Why the saved hotkey couldn't be set when the app started.
+struct HotkeyError(Mutex<Option<String>>);
+
+#[tauri::command]
+fn hotkey_error(state: State<HotkeyError>) -> Option<String> {
+    state.0.lock().unwrap().clone()
+}
+
+/// Sets and saves the hotkey; a key that can't be used leaves the old one in place.
+#[tauri::command]
+fn set_manual_hotkey(app: AppHandle, state: State<HotkeyError>, hotkey: Option<String>) -> CmdResult<()> {
+    let mut cfg = config::load().map_err(err)?;
+    if let Err(e) = apply_hotkey(&app, hotkey.as_deref()) {
+        let _ = apply_hotkey(&app, cfg.manual_hotkey.as_deref());
+        return Err(e);
+    }
+    *state.0.lock().unwrap() = None;
+    cfg.manual_hotkey = hotkey;
+    config::save(&cfg).map(|_| ()).map_err(err)
+}
+
 // ---------- settings ----------
 
 #[tauri::command]
@@ -599,27 +670,11 @@ struct GameFrame {
 async fn grab_game_frame() -> CmdResult<GameFrame> {
     tauri::async_runtime::spawn_blocking(|| {
         let window = ownclips::capture::find_valorant_window().map_err(err)?;
-        let (control, sink) = ownclips::capture::start_capture(window).map_err(err)?;
-        let deadline = Instant::now() + Duration::from_secs(3);
-        let frame = loop {
-            if let Some(f) = sink.lock().unwrap().latest.clone().filter(|f| f.width > 0) {
-                break Some(f);
-            }
-            if Instant::now() > deadline {
-                break None;
-            }
-            thread::sleep(Duration::from_millis(30));
-        };
-        let _ = control.stop();
-        let frame = frame.ok_or("沒有擷取到遊戲畫面,請確認 Valorant 視窗沒有被最小化")?;
-        let img = frame.to_image().ok_or("擷取畫面資料大小不一致")?;
-        let rgb = image::DynamicImage::ImageRgba8(img).into_rgb8();
-        let mut jpeg = Vec::new();
-        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut Cursor::new(&mut jpeg), 88)
-            .encode_image(&rgb)
-            .map_err(err)?;
+        let frame = ownclips::capture::grab_frame(window, Duration::from_secs(3))
+            .map_err(|_| "沒有擷取到遊戲畫面,請確認 Valorant 視窗沒有被最小化")?;
+        let rgb = frame.to_rgb().ok_or("擷取畫面資料大小不一致")?;
         Ok(GameFrame {
-            image: format!("data:image/jpeg;base64,{}", base64::engine::general_purpose::STANDARD.encode(jpeg)),
+            image: jpeg_data_url(&rgb, 88)?,
             width: frame.width,
             height: frame.height,
         })
@@ -646,6 +701,15 @@ fn main() {
         ))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, _shortcut, event| {
+                    if event.state() == ShortcutState::Pressed {
+                        toggle_manual(app);
+                    }
+                })
+                .build(),
+        )
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 if config::load().map(|c| c.close_to_tray).unwrap_or(true) {
@@ -670,6 +734,8 @@ fn main() {
             app.manage(tray);
             let bg = start_background(app.handle().clone());
             app.manage(bg);
+            let hotkey = config::load().ok().and_then(|c| c.manual_hotkey);
+            app.manage(HotkeyError(Mutex::new(apply_hotkey(app.handle(), hotkey.as_deref()).err())));
             // The window starts hidden; launched by autostart it stays in the tray.
             if !std::env::args().any(|a| a == BACKGROUND_ARG) {
                 show_main(app.handle());
@@ -681,6 +747,9 @@ fn main() {
             list_windows,
             start_manual_recording,
             stop_manual_recording,
+            window_preview,
+            hotkey_error,
+            set_manual_hotkey,
             get_config,
             save_config,
             recordings_dir,

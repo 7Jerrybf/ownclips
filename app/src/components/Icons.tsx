@@ -114,3 +114,55 @@ export const IconCrop = (p: P) => (
     <path d="M6 2v14a2 2 0 0 0 2 2h14M18 22V8a2 2 0 0 0-2-2H2" />
   </Svg>
 );
+export const IconPause = (p: P) => (
+  <Svg {...p}>
+    <path d="M6 4h4v16H6zM14 4h4v16h-4z" fill="currentColor" />
+  </Svg>
+);
+/** Circular arrow with a "5": skip 5 seconds back / forward. */
+const Skip5 = ({ dir, ...p }: P & { dir: 1 | -1 }) => (
+  <Svg {...p}>
+    <g transform={dir < 0 ? "matrix(-1 0 0 1 24 0)" : undefined}>
+      <path d="M20 12a8 8 0 1 1-2.34-5.66" />
+      <path d="M20 3v4h-4" />
+    </g>
+    <text x="12" y="15.5" fontSize="9" fontWeight="700" textAnchor="middle" fill="currentColor" stroke="none">
+      5
+    </text>
+  </Svg>
+);
+export const IconBack5 = (p: P) => <Skip5 dir={-1} {...p} />;
+export const IconFwd5 = (p: P) => <Skip5 dir={1} {...p} />;
+export const IconVolume = (p: P) => (
+  <Svg {...p}>
+    <path d="M4 9h4l5-4v14l-5-4H4z" />
+    <path d="M16.5 8.5a5 5 0 0 1 0 7M19 6a8.5 8.5 0 0 1 0 12" />
+  </Svg>
+);
+export const IconMute = (p: P) => (
+  <Svg {...p}>
+    <path d="M4 9h4l5-4v14l-5-4H4z" />
+    <path d="m17 9 5 6M22 9l-5 6" />
+  </Svg>
+);
+export const IconFullscreen = (p: P) => (
+  <Svg {...p}>
+    <path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5" />
+  </Svg>
+);
+export const IconExitFullscreen = (p: P) => (
+  <Svg {...p}>
+    <path d="M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5" />
+  </Svg>
+);
+/** Clip start / end marks: a bracket with a tick. */
+export const IconMarkIn = (p: P) => (
+  <Svg {...p}>
+    <path d="M10 4H6v16h4M14 12h6M17 9l3 3-3 3" />
+  </Svg>
+);
+export const IconMarkOut = (p: P) => (
+  <Svg {...p}>
+    <path d="M14 4h4v16h-4M4 12h6M7 9l3 3-3 3" />
+  </Svg>
+);

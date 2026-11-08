@@ -44,6 +44,8 @@ pub enum AudioMode {
     System,
     /// The game's audio plus the default microphone.
     GameAndMic,
+    /// Everything the speakers/headphones play plus the default microphone.
+    SystemAndMic,
     /// No audio track.
     Off,
 }
@@ -98,6 +100,7 @@ impl AudioRecorder {
             AudioMode::Game => vec![Source::Process(game_pid)],
             AudioMode::System => vec![Source::SystemLoopback],
             AudioMode::GameAndMic => vec![Source::Process(game_pid), Source::Microphone],
+            AudioMode::SystemAndMic => vec![Source::SystemLoopback, Source::Microphone],
         };
 
         let stop = Arc::new(AtomicBool::new(false));

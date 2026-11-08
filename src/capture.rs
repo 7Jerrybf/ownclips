@@ -1,4 +1,5 @@
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use serde::Serialize;
@@ -152,18 +153,48 @@ fn is_cloaked(window: &Window) -> bool {
 /// The windows that can be recorded, front to back: not our own, not
 /// cloaked, and not minimized ones (they sit at -32000 and deliver no frames).
 pub fn list_windows() -> Result<Vec<WindowInfo>> {
-    let own_pid = std::process::id();
     let windows = Window::enumerate().map_err(|e| anyhow!("列出視窗失敗: {e}"))?;
-    Ok(windows
-        .into_iter()
-        .filter_map(|w| {
-            let title = w.title().ok().filter(|t| !t.trim().is_empty() && t != "Program Manager")?;
-            if w.process_id().ok()? == own_pid || w.rect().ok()?.left <= -32000 || is_cloaked(&w) {
-                return None;
-            }
-            Some(WindowInfo { hwnd: w.as_raw_hwnd() as usize, title, process: w.process_name().unwrap_or_default() })
-        })
-        .collect())
+    Ok(windows.iter().filter_map(recordable).collect())
+}
+
+fn recordable(w: &Window) -> Option<WindowInfo> {
+    let title = w.title().ok().filter(|t| !t.trim().is_empty() && t != "Program Manager")?;
+    if w.process_id().ok()? == std::process::id() || w.rect().ok()?.left <= -32000 || is_cloaked(w) {
+        return None;
+    }
+    Some(WindowInfo { hwnd: w.as_raw_hwnd() as usize, title, process: w.process_name().unwrap_or_default() })
+}
+
+/// The window in front, if it can be recorded.
+pub fn foreground_window() -> Option<WindowInfo> {
+    Window::foreground().ok().filter(Window::is_valid).as_ref().and_then(recordable)
+}
+
+/// One frame of `window`, or an error if none arrives within `timeout`.
+pub fn grab_frame(window: Window, timeout: Duration) -> Result<FrameData> {
+    let (control, sink) = start_capture(window)?;
+    let deadline = Instant::now() + timeout;
+    let frame = loop {
+        if let Some(f) = sink.lock().unwrap().latest.clone().filter(|f| f.width > 0) {
+            break Some(f);
+        }
+        if Instant::now() > deadline {
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(30));
+    };
+    let _ = control.stop();
+    frame.ok_or_else(|| anyhow!("沒有擷取到視窗畫面,請確認視窗沒有被最小化"))
+}
+
+/// A small image of the window `hwnd`, at most `width` pixels wide.
+pub fn window_thumbnail(hwnd: usize, width: u32) -> Result<image::RgbImage> {
+    let window = Window::from_raw_hwnd(hwnd as *mut std::ffi::c_void);
+    let frame = grab_frame(window, Duration::from_secs(2))?;
+    let img = frame.to_rgb().ok_or_else(|| anyhow!("擷取畫面資料大小不一致"))?;
+    let width = width.min(img.width()).max(1);
+    let height = (img.height() as u64 * width as u64 / img.width().max(1) as u64).max(1) as u32;
+    Ok(image::imageops::thumbnail(&img, width, height))
 }
 
 /// Starts a background capture of `window` and returns a handle to stop it
@@ -177,7 +208,7 @@ pub fn start_capture(window: Window) -> Result<(Control, SharedSink)> {
 /// and, given a `region`, only that part of each frame.
 pub fn start_capture_every(
     window: Window,
-    interval: Option<std::time::Duration>,
+    interval: Option<Duration>,
     region: Option<RegionPct>,
 ) -> Result<(Control, SharedSink)> {
     let sink: SharedSink = Arc::new(Mutex::new(FrameSink::default()));

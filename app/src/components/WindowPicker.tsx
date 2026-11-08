@@ -1,4 +1,4 @@
-// Picks the window to record by hand.
+// Picks the window to record by hand, with a picture of each.
 import { useEffect, useState } from "react";
 import type { WindowInfo } from "../api";
 import { api } from "../api";
@@ -13,11 +13,19 @@ export function WindowPicker({
   notify: (message: string, kind?: "error") => void;
 }) {
   const [windows, setWindows] = useState<WindowInfo[] | null>(null);
+  // null: the window couldn't be captured; missing: still loading.
+  const [previews, setPreviews] = useState<Record<number, string | null>>({});
 
   useEffect(() => {
     api
       .listWindows()
-      .then(setWindows)
+      .then((list) => {
+        setWindows(list);
+        list.forEach((w) => {
+          const done = (image: string | null) => setPreviews((p) => ({ ...p, [w.hwnd]: image }));
+          api.windowPreview(w.hwnd).then(done, () => done(null));
+        });
+      })
       .catch((e) => {
         notify(String(e), "error");
         onClose();
@@ -36,7 +44,14 @@ export function WindowPicker({
         </div>
         <div className="window-list">
           {windows?.map((w) => (
-            <button key={w.hwnd} className="window-item" onClick={() => onPick(w)}>
+            <button key={w.hwnd} className="window-item" title={w.title} onClick={() => onPick(w)}>
+              <span className="window-preview">
+                {previews[w.hwnd] ? (
+                  <img src={previews[w.hwnd]!} alt="" draggable={false} />
+                ) : (
+                  <span>{previews[w.hwnd] === null ? "無法預覽" : "載入中…"}</span>
+                )}
+              </span>
               <span className="window-title">{w.title}</span>
               <span className="window-process">{w.process}</span>
             </button>

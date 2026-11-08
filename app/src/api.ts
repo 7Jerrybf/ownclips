@@ -3,7 +3,7 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 
 export type EventKind = "kill" | "death" | "assist";
 export type Game = "valorant" | "league" | "other";
-export type AudioMode = "game" | "system" | "game_and_mic" | "off";
+export type AudioMode = "game" | "system" | "game_and_mic" | "system_and_mic" | "off";
 export type VideoCodec = "av1" | "h264";
 export type VideoQuality = "high" | "standard" | "small";
 
@@ -49,6 +49,7 @@ export interface Config {
   video_bitrate_mbps: number;
   close_to_tray: boolean;
   storage_limit_gb: number | null;
+  manual_hotkey: string | null;
 }
 
 export interface RecorderStatus {
@@ -97,6 +98,9 @@ export const api = {
   listWindows: () => invoke<WindowInfo[]>("list_windows"),
   startManual: (hwnd: number) => invoke<void>("start_manual_recording", { hwnd }),
   stopManual: () => invoke<void>("stop_manual_recording"),
+  windowPreview: (hwnd: number) => invoke<string | null>("window_preview", { hwnd }),
+  hotkeyError: () => invoke<string | null>("hotkey_error"),
+  setManualHotkey: (hotkey: string | null) => invoke<void>("set_manual_hotkey", { hotkey }),
   getConfig: () => invoke<Config>("get_config"),
   saveConfig: (cfg: Config) => invoke<void>("save_config", { cfg }),
   recordingsDir: () => invoke<string>("recordings_dir"),
