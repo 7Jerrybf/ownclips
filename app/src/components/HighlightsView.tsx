@@ -1,38 +1,44 @@
-// Every highlight range across all matches, newest first. Nothing here is
-// a separate file: previews and playback come from the full recordings.
-import { useMemo, useState } from "react";
-import type { MatchSummary } from "../api";
-import { clock, type DateRange, inRange, timeOf } from "../format";
-import { type Highlight, highlights, killLabel } from "../highlights";
+// The clips exported from matches (the files in the recordings' `clips`
+// folder), newest first.
+import { useState } from "react";
+import type { ClipSummary } from "../api";
+import { api } from "../api";
+import { clock, type DateRange, inRange, size, stampOf, timeOf } from "../format";
 import { DayGroups, RangeFilter } from "./DayGroups";
-import { IconClips, IconPlay } from "./Icons";
+import { IconClips, IconFolder, IconTrash } from "./Icons";
 import { VideoThumb } from "./VideoThumb";
 
-type Filter = "all" | "multi";
+/** What a clip shows as its title: the map it came from, or its file name. */
+export const clipTitle = (c: ClipSummary) => c.info?.map ?? c.name;
+
+/** The folder a file is in. */
+const folderOf = (path: string) => path.replace(/[\\/][^\\/]+$/, "");
 
 export function HighlightsView({
-  matches,
-  pre,
-  post,
+  clips,
   onOpen,
+  notify,
 }: {
-  matches: MatchSummary[];
-  pre: number;
-  post: number;
-  onOpen: (h: Highlight) => void;
+  clips: ClipSummary[];
+  onOpen: (c: ClipSummary) => void;
+  notify: (message: string, kind?: "error" | "success") => void;
 }) {
-  const [filter, setFilter] = useState<Filter>("all");
   const [range, setRange] = useState<DateRange>("all");
   const [hovered, setHovered] = useState<string | null>(null);
+  const [confirm, setConfirm] = useState<string | null>(null);
 
-  const all = useMemo(
-    () => matches.filter((m) => !m.recording).flatMap((m) => highlights(m, pre, post).reverse()),
-    [matches, pre, post],
-  );
-  const shown = all.filter(
-    (h) => (filter === "all" || h.kills >= 2) && inRange(h.match.info.started_at, range),
-  );
-  const multi = all.filter((h) => h.kills >= 2).length;
+  const shown = clips.filter((c) => inRange(stampOf(c.modified_ms), range));
+  const total = clips.reduce((n, c) => n + c.size, 0);
+
+  async function remove(c: ClipSummary) {
+    setConfirm(null);
+    try {
+      await api.deleteClips([c.path]);
+      notify("已移到資源回收筒", "success");
+    } catch (e) {
+      notify(String(e), "error");
+    }
+  }
 
   return (
     <div className="page">
@@ -40,71 +46,84 @@ export function HighlightsView({
         <div>
           <h1 className="page-title">精華</h1>
           <div className="page-sub">
-            {all.length} 個精華區間 · {multi} 個多殺 · 直接從整場錄影播放,不另存檔案
+            {clips.length} 個剪輯片段{clips.length > 0 && ` · ${size(total)}`} · 在對局裡設好起點與終點後按剪刀匯出
           </div>
         </div>
+        {clips.length > 0 && (
+          <div className="page-actions">
+            <button className="btn" onClick={() => api.openPath(folderOf(clips[0].path))}>
+              <IconFolder size={16} /> 開啟資料夾
+            </button>
+          </div>
+        )}
       </div>
 
-      <div className="filter-row">
-        <div className="segmented">
-          <button className={filter === "all" ? "on" : ""} onClick={() => setFilter("all")}>
-            全部
-          </button>
-          <button className={filter === "multi" ? "on" : ""} onClick={() => setFilter("multi")}>
-            多殺
-          </button>
+      {clips.length > 0 && (
+        <div className="filter-row">
+          <RangeFilter value={range} onChange={setRange} />
         </div>
-        <RangeFilter value={range} onChange={setRange} />
-      </div>
+      )}
 
       {shown.length === 0 ? (
         <div className="empty">
           <IconClips size={34} />
-          <h3>{all.length === 0 ? "還沒有精華" : "沒有符合的精華"}</h3>
-          <div>每次擊殺都會自動成為一個精華區間,相近的擊殺會合併成多殺。</div>
+          <h3>{clips.length === 0 ? "還沒有剪輯片段" : "這段期間沒有剪輯片段"}</h3>
+          <div>打開一場對局,在時間軸上拖曳金色把手設定起點與終點,再按剪刀匯出,片段就會出現在這裡。</div>
         </div>
       ) : (
-        <DayGroups
-          items={shown}
-          startedAt={(h) => h.match.info.started_at}
-          summary={(day) => `${day.length} 個精華 · ${day.filter((h) => h.kills >= 2).length} 個多殺`}
-        >
-          {(h) => {
-            const key = `${h.match.video}@${h.start}`;
-            return (
-              <div
-                key={key}
-                className="card"
-                onClick={() => onOpen(h)}
-                onMouseEnter={() => setHovered(key)}
-                onMouseLeave={() => setHovered(null)}
-              >
-                <div className="thumb">
-                  <VideoThumb path={h.match.video} at={h.firstKill} end={h.end} hovered={hovered === key} />
-                  <div className="shade" />
-                  <div className="badge-tl">
-                    <span className={`chip ${h.kills >= 2 ? "gold" : "kill"}`}>{killLabel(h.kills)}</span>
-                  </div>
-                  <div className="corner">
-                    <span style={{ fontWeight: 700, textShadow: "0 2px 8px rgba(0,0,0,.6)" }}>{h.match.info.map}</span>
-                    <span className="duration-badge num">
-                      <IconPlay size={10} /> {Math.round(h.end - h.start)}s
-                    </span>
-                  </div>
+        <DayGroups items={shown} startedAt={(c) => stampOf(c.modified_ms)} summary={(day) => `${day.length} 個片段`}>
+          {(c) => (
+            <div
+              key={c.path}
+              className="card"
+              onClick={() => onOpen(c)}
+              onMouseEnter={() => setHovered(c.path)}
+              onMouseLeave={() => setHovered(null)}
+            >
+              <div className="thumb">
+                <VideoThumb path={c.path} at={0.5} hovered={hovered === c.path} />
+                <div className="shade" />
+                <div className="corner">
+                  <span style={{ fontWeight: 700, textShadow: "0 2px 8px rgba(0,0,0,.6)" }}>{clipTitle(c)}</span>
                 </div>
-                <div className="card-body">
-                  <div className="card-row">
-                    <span className="card-meta num">
-                      {h.match.info.mode} · 對局 {clock(h.start)} – {clock(h.end)}
-                    </span>
-                    <span className="card-meta" style={{ marginLeft: "auto" }}>
-                      {timeOf(h.match.info.started_at)}
-                    </span>
+              </div>
+              <div className="card-body">
+                <div className="card-row">
+                  <span className="card-meta num">
+                    {[c.info?.mode, c.at !== null ? `對局 ${clock(c.at)}` : null].filter(Boolean).join(" · ") ||
+                      "剪輯片段"}
+                  </span>
+                  <span className="card-meta" style={{ marginLeft: "auto" }}>
+                    {timeOf(stampOf(c.modified_ms))}
+                  </span>
+                </div>
+                <div className="card-row" onClick={(e) => e.stopPropagation()}>
+                  <span className="card-meta">{size(c.size)}</span>
+                  <div className="card-actions" style={{ marginLeft: "auto" }}>
+                    {confirm === c.path ? (
+                      <>
+                        <button className="btn sm danger" onClick={() => remove(c)}>
+                          確定刪除
+                        </button>
+                        <button className="btn sm ghost" onClick={() => setConfirm(null)}>
+                          取消
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <button className="btn sm ghost" title="在檔案總管顯示" onClick={() => api.reveal(c.path)}>
+                          <IconFolder size={15} />
+                        </button>
+                        <button className="btn sm ghost" title="刪除這個片段" onClick={() => setConfirm(c.path)}>
+                          <IconTrash size={15} />
+                        </button>
+                      </>
+                    )}
                   </div>
                 </div>
               </div>
-            );
-          }}
+            </div>
+          )}
         </DayGroups>
       )}
     </div>

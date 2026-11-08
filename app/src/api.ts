@@ -30,6 +30,19 @@ export interface MatchSummary {
   recording: boolean;
 }
 
+export interface ClipSummary {
+  path: string;
+  name: string;
+  size: number;
+  /** When the file was written, ms since the epoch. */
+  modified_ms: number;
+  /** The recording it was cut from, if still around. */
+  source: string | null;
+  info: MatchInfo | null;
+  /** Where in the match it starts, in seconds. */
+  at: number | null;
+}
+
 export interface RegionPct {
   x: number;
   y: number;
@@ -111,6 +124,8 @@ export const api = {
   reveal: (path: string) => invoke<void>("reveal", { path }),
   openPath: (path: string) => invoke<void>("open_path", { path }),
   cutRange: (video: string, start: number, end: number) => invoke<string>("cut_range", { video, start, end }),
+  listClips: () => invoke<ClipSummary[]>("list_clips"),
+  deleteClips: (paths: string[]) => invoke<number>("delete_clips", { paths }),
   reanalyze: (video: string) => invoke<void>("reanalyze_match", { video }),
   storageUsage: (limitGb: number | null) => invoke<StorageUsage>("storage_usage", { limitGb }),
   cleanStorage: () => invoke<number>("clean_storage"),

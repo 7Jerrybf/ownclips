@@ -534,11 +534,94 @@ fn open_path(path: String) -> CmdResult<()> {
 }
 
 #[tauri::command]
-async fn cut_range(video: String, start: f64, end: f64) -> CmdResult<String> {
+async fn cut_range(app: AppHandle, video: String, start: f64, end: f64) -> CmdResult<String> {
     tauri::async_runtime::spawn_blocking(move || {
-        clip::cut_range(Path::new(&video), start, end, "精選")
-            .map(|p| p.to_string_lossy().into_owned())
-            .map_err(|e| format!("{e:#}"))
+        let path = clip::cut_range(Path::new(&video), start, end, "精選").map_err(|e| format!("{e:#}"))?;
+        let _ = app.emit("clips-changed", ());
+        Ok(path.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(err)?
+}
+
+/// A clip exported from a match (a file in the recordings' `clips` folder).
+#[derive(Serialize)]
+struct ClipSummary {
+    path: String,
+    name: String,
+    size: u64,
+    /// When the file was written, in ms since the Unix epoch.
+    modified_ms: u64,
+    /// The recording it was cut from, if that is still around.
+    source: Option<String>,
+    /// That match's details (map, mode, ...), when known.
+    info: Option<MatchInfo>,
+    /// Where in the match the clip starts, in seconds (from the file name).
+    at: Option<u32>,
+}
+
+fn clips_dir() -> CmdResult<PathBuf> {
+    Ok(config::load().map_err(err)?.recordings_dir().map_err(err)?.join("clips"))
+}
+
+/// Clip files are named "<recording stem> <MM>m<SS>s <label>.<ext>"; the
+/// recording stem is the 19-character start time "YYYY-MM-DD HH-MM-SS".
+fn clip_origin(dir: &Path, name: &str) -> (Option<PathBuf>, Option<u32>) {
+    let Some(stem) = name.get(..19) else { return (None, None) };
+    let parent = dir.parent().unwrap_or(dir);
+    let source = ["mp4", "mkv"].iter().map(|ext| parent.join(format!("{stem}.{ext}"))).find(|p| p.exists());
+    let at = name[19..].split_whitespace().next().and_then(|t| {
+        let (m, s) = t.strip_suffix('s')?.split_once('m')?;
+        Some(m.parse::<u32>().ok()? * 60 + s.parse::<u32>().ok()?)
+    });
+    (source, at)
+}
+
+#[tauri::command]
+fn list_clips() -> CmdResult<Vec<ClipSummary>> {
+    let dir = clips_dir()?;
+    let mut out: Vec<ClipSummary> = dir_files(&dir)
+        .into_iter()
+        .filter(|p| clip::is_video(p))
+        .filter_map(|p| {
+            let meta = fs::metadata(&p).ok()?;
+            let name = p.file_stem()?.to_string_lossy().into_owned();
+            let (source, at) = clip_origin(&dir, &name);
+            let modified_ms = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_millis() as u64);
+            Some(ClipSummary {
+                info: source.as_deref().and_then(MatchInfo::load),
+                source: source.map(|s| s.to_string_lossy().into_owned()),
+                path: p.to_string_lossy().into_owned(),
+                size: meta.len(),
+                modified_ms,
+                name,
+                at,
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| b.modified_ms.cmp(&a.modified_ms));
+    Ok(out)
+}
+
+/// Moves exported clips to the recycle bin; only files in the clips folder.
+#[tauri::command]
+async fn delete_clips(app: AppHandle, paths: Vec<String>) -> CmdResult<usize> {
+    let dir = clips_dir()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let files: Vec<PathBuf> = paths
+            .into_iter()
+            .map(PathBuf::from)
+            .filter(|p| p.parent() == Some(dir.as_path()) && p.is_file() && clip::is_video(p))
+            .collect();
+        if !files.is_empty() {
+            trash::delete_all(&files).map_err(err)?;
+        }
+        let _ = app.emit("clips-changed", ());
+        Ok(files.len())
     })
     .await
     .map_err(err)?
@@ -760,6 +843,8 @@ fn main() {
             reveal,
             open_path,
             cut_range,
+            list_clips,
+            delete_clips,
             reanalyze_match,
             storage_usage,
             clean_storage,

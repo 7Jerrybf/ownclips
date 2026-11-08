@@ -11,8 +11,10 @@ import {
   IconFullscreen,
   IconFwd5,
   IconMute,
+  IconNext,
   IconPause,
   IconPlay,
+  IconPrev,
   IconVolume,
 } from "./Icons";
 
@@ -21,7 +23,7 @@ export const SKIP = 5;
 const IDLE_MS = 2500;
 
 export function speedLabel(s: number) {
-  return s === 1 ? "正常" : `${s}x`;
+  return `${s}x`;
 }
 
 export function Player({
@@ -29,11 +31,8 @@ export function Player({
   src,
   current,
   duration,
-  speed,
-  onSpeed,
-  onSkip,
   timeline,
-  navTools,
+  onEvent,
   editTools,
   onLoadedMetadata,
   onSeeking,
@@ -42,13 +41,10 @@ export function Player({
   src: string;
   current: number;
   duration: number;
-  speed: number;
-  onSpeed: (s: number) => void;
-  onSkip: (seconds: number) => void;
   /** The seek bar, full width across the top of the controls. */
   timeline: ReactNode;
-  /** Buttons after the ±5 s ones (e.g. previous / next event). */
-  navTools?: ReactNode;
+  /** Jump to the previous (-1) / next (1) event; adds those buttons. */
+  onEvent?: (dir: 1 | -1) => void;
   /** Buttons before the speed menu (e.g. clip in / out / export). */
   editTools?: ReactNode;
   onLoadedMetadata: ReactEventHandler<HTMLVideoElement>;
@@ -64,6 +60,31 @@ export function Player({
   /** A button is held down in the controls (e.g. dragging a timeline handle). */
   const [holding, setHolding] = useState(false);
   const idleTimer = useRef(0);
+  const [speed, setSpeed] = useState(() => {
+    try {
+      const s = Number(localStorage.getItem("playback-speed"));
+      return SPEEDS.includes(s) ? s : 1;
+    } catch {
+      return 1;
+    }
+  });
+  const onSpeed = useCallback((s: number) => {
+    setSpeed(s);
+    try {
+      localStorage.setItem("playback-speed", String(s));
+    } catch {
+      // Not remembered; fine.
+    }
+  }, []);
+  const onSkip = useCallback(
+    (seconds: number) => {
+      const v = videoRef.current;
+      if (!v) return;
+      const end = Number.isFinite(v.duration) ? v.duration : duration;
+      v.currentTime = Math.min(end, Math.max(0, v.currentTime + seconds));
+    },
+    [duration, videoRef],
+  );
 
   useEffect(() => {
     const v = videoRef.current;
@@ -84,18 +105,27 @@ export function Player({
     else void wrap.current?.requestFullscreen();
   }, []);
 
-  // "F" toggles fullscreen (the other shortcuts live in MatchDetail).
+  // Player shortcuts; pages add their own (event jumps, clip in/out).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.target as HTMLElement).tagName === "INPUT") return;
-      if (e.key === "f" || e.key === "F") {
-        e.preventDefault();
-        toggleFullscreen();
-      }
+      const tag = (e.target as HTMLElement).tagName;
+      if (tag === "INPUT" || e.ctrlKey || e.altKey || e.metaKey) return;
+      const v = videoRef.current;
+      if (!v) return;
+      // A focused button already handles Space itself.
+      if (e.key === " " && tag === "BUTTON") return;
+      if (e.key === "f" || e.key === "F") toggleFullscreen();
+      else if (e.key === " ") v.paused ? void v.play() : v.pause();
+      else if (e.key === "ArrowRight") onSkip(SKIP);
+      else if (e.key === "ArrowLeft") onSkip(-SKIP);
+      else if (e.key === ">") onSpeed(SPEEDS[Math.min(SPEEDS.length - 1, SPEEDS.indexOf(speed) + 1)]);
+      else if (e.key === "<") onSpeed(SPEEDS[Math.max(0, SPEEDS.indexOf(speed) - 1)]);
+      else return;
+      e.preventDefault();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [toggleFullscreen]);
+  }, [toggleFullscreen, onSkip, onSpeed, speed, videoRef]);
 
   const wake = useCallback(() => {
     setIdle(false);
@@ -156,83 +186,102 @@ export function Player({
       >
         <div className="player-timeline">{timeline}</div>
 
+        {/* Volume and time | transport, centred | clip tools and view. */}
         <div className="player-row">
-          <button className="player-btn" onClick={togglePlay} title={playing ? "暫停 (Space)" : "播放 (Space)"}>
-            {playing ? <IconPause size={18} /> : <IconPlay size={18} />}
-          </button>
-          <button className="player-btn" onClick={() => onSkip(-SKIP)} title={`倒退 ${SKIP} 秒 (←)`}>
-            <IconBack5 size={20} />
-          </button>
-          <button className="player-btn" onClick={() => onSkip(SKIP)} title={`快進 ${SKIP} 秒 (→)`}>
-            <IconFwd5 size={20} />
-          </button>
-          {navTools}
-
-          <div className="player-volume">
-            <button
-              className="player-btn"
-              onClick={() => {
-                const v = videoRef.current;
-                if (!v) return;
-                v.muted = !v.muted;
-                if (!v.muted && v.volume === 0) v.volume = 1;
-              }}
-              title={muted ? "取消靜音" : "靜音"}
-            >
-              {vol === 0 ? <IconMute size={18} /> : <IconVolume size={18} />}
-            </button>
-            <input
-              type="range"
-              min={0}
-              max={1}
-              step={0.05}
-              value={vol}
-              style={{ "--pct": `${vol * 100}%` } as CSSProperties}
-              onChange={(e) => {
-                const v = videoRef.current;
-                if (!v) return;
-                v.volume = Number(e.currentTarget.value);
-                v.muted = v.volume === 0;
-              }}
-              onMouseUp={(e) => e.currentTarget.blur()}
-            />
+          <div className="player-side">
+            <div className="player-volume">
+              <button
+                className="player-btn"
+                onClick={() => {
+                  const v = videoRef.current;
+                  if (!v) return;
+                  v.muted = !v.muted;
+                  if (!v.muted && v.volume === 0) v.volume = 1;
+                }}
+                title={muted ? "取消靜音" : "靜音"}
+              >
+                {vol === 0 ? <IconMute size={18} /> : <IconVolume size={18} />}
+              </button>
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.05}
+                value={vol}
+                style={{ "--pct": `${vol * 100}%` } as CSSProperties}
+                onChange={(e) => {
+                  const v = videoRef.current;
+                  if (!v) return;
+                  v.volume = Number(e.currentTarget.value);
+                  v.muted = v.volume === 0;
+                }}
+                onMouseUp={(e) => e.currentTarget.blur()}
+              />
+            </div>
+            <span className="player-time num">
+              {clock(current)} / {clock(duration)}
+            </span>
           </div>
 
-          <span className="player-time num">
-            {clock(current)} / {clock(duration)}
-          </span>
-
-          <div className="player-tools">{editTools}</div>
-
-          <div className="player-speed">
-            <button
-              className={`player-btn text ${speed !== 1 ? "on" : ""}`}
-              onClick={() => setSpeedMenu((o) => !o)}
-              title="播放速度 (Shift + < / >)"
-            >
-              {speed === 1 ? "1x" : `${speed}x`}
+          <div className="player-transport">
+            {onEvent && (
+              <button className="player-btn" onClick={() => onEvent(-1)} title="上一個事件 ( , )">
+                <IconPrev size={18} />
+              </button>
+            )}
+            <button className="player-btn" onClick={() => onSkip(-SKIP)} title={`倒退 ${SKIP} 秒 (←)`}>
+              <IconBack5 size={20} />
             </button>
-            {speedMenu && (
-              <div className="player-menu">
-                {[...SPEEDS].reverse().map((s) => (
-                  <button
-                    key={s}
-                    className={s === speed ? "on" : ""}
-                    onClick={() => {
-                      onSpeed(s);
-                      setSpeedMenu(false);
-                    }}
-                  >
-                    {speedLabel(s)}
-                  </button>
-                ))}
-              </div>
+            <button className="player-btn play" onClick={togglePlay} title={playing ? "暫停 (Space)" : "播放 (Space)"}>
+              {playing ? <IconPause size={22} /> : <IconPlay size={22} />}
+            </button>
+            <button className="player-btn" onClick={() => onSkip(SKIP)} title={`快進 ${SKIP} 秒 (→)`}>
+              <IconFwd5 size={20} />
+            </button>
+            {onEvent && (
+              <button className="player-btn" onClick={() => onEvent(1)} title="下一個事件 ( . )">
+                <IconNext size={18} />
+              </button>
             )}
           </div>
 
-          <button className="player-btn" onClick={toggleFullscreen} title={fullscreen ? "離開全螢幕 (F)" : "全螢幕 (F)"}>
-            {fullscreen ? <IconExitFullscreen size={18} /> : <IconFullscreen size={18} />}
-          </button>
+          <div className="player-side end">
+            <div className="player-tools">{editTools}</div>
+
+            <div className="player-speed">
+              <button
+                className={`player-btn text ${speed !== 1 ? "on" : ""}`}
+                onClick={() => setSpeedMenu((o) => !o)}
+                title="播放速度 (Shift + < / >)"
+              >
+                {speed === 1 ? "1x" : `${speed}x`}
+              </button>
+              {speedMenu && (
+                <div className="player-menu">
+                  {[...SPEEDS].reverse().map((s) => (
+                    <button
+                      key={s}
+                      className={s === speed ? "on" : ""}
+                      onClick={() => {
+                        onSpeed(s);
+                        setSpeedMenu(false);
+                      }}
+                    >
+                      {speedLabel(s)}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <button
+              className="player-btn"
+              onClick={toggleFullscreen}
+              title={fullscreen ? "離開全螢幕 (F)" : "全螢幕 (F)"}
+            >
+              {fullscreen ? <IconExitFullscreen size={18} /> : <IconFullscreen size={18} />}
+            </button>
+          </div>
         </div>
       </div>
     </div>

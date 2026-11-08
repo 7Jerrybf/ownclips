@@ -16,12 +16,11 @@ import {
   IconKill,
   IconMarkIn,
   IconMarkOut,
-  IconNext,
   IconPlay,
-  IconPrev,
   IconScissors,
+  IconX,
 } from "./Icons";
-import { Player, SKIP, SPEEDS } from "./Player";
+import { Player } from "./Player";
 import { Timeline } from "./Timeline";
 
 const LEAD_IN = 3;
@@ -109,33 +108,6 @@ export function MatchDetail({
     if (play) void v.play();
   }, []);
 
-  const skip = useCallback(
-    (seconds: number) => {
-      const v = video.current;
-      if (!v) return;
-      const end = Number.isFinite(v.duration) ? v.duration : duration;
-      seek(Math.min(end, Math.max(0, v.currentTime + seconds)), !v.paused);
-    },
-    [duration, seek],
-  );
-
-  const [speed, setSpeed] = useState(() => {
-    try {
-      const s = Number(localStorage.getItem("playback-speed"));
-      return SPEEDS.includes(s) ? s : 1;
-    } catch {
-      return 1;
-    }
-  });
-  const changeSpeed = useCallback((s: number) => {
-    setSpeed(s);
-    try {
-      localStorage.setItem("playback-speed", String(s));
-    } catch {
-      // Not remembered; fine.
-    }
-  }, []);
-
   const playHighlight = useCallback(
     (h: { start: number; end: number }) => {
       playingRange.current = [h.start, h.end];
@@ -163,23 +135,18 @@ export function MatchDetail({
       if (tag === "INPUT") return;
       const v = video.current;
       if (!v) return;
-      // A focused button already handles Space itself.
-      if (e.key === " " && tag === "BUTTON") return;
-      if (e.key === "ArrowRight") skip(SKIP);
-      else if (e.key === "ArrowLeft") skip(-SKIP);
-      else if (e.key === ">") changeSpeed(SPEEDS[Math.min(SPEEDS.length - 1, SPEEDS.indexOf(speed) + 1)]);
-      else if (e.key === "<") changeSpeed(SPEEDS[Math.max(0, SPEEDS.indexOf(speed) - 1)]);
-      else if (e.key === ".") jump(1);
+      if (e.ctrlKey || e.altKey || e.metaKey) return;
+      // Space, arrows, < > and F are the player's own.
+      if (e.key === ".") jump(1);
       else if (e.key === ",") jump(-1);
       else if (e.key === "i") setRange([v.currentTime, null]);
       else if (e.key === "o") setRange(([s]) => [s ?? 0, v.currentTime]);
-      else if (e.key === " ") v.paused ? void v.play() : v.pause();
       else return;
       e.preventDefault();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [jump, skip, speed, changeSpeed]);
+  }, [jump]);
 
   async function exportRange(start: number, end: number) {
     setBusy(true);
@@ -244,9 +211,6 @@ export function MatchDetail({
             src={fileUrl(match.video)}
             current={current}
             duration={duration}
-            speed={speed}
-            onSpeed={changeSpeed}
-            onSkip={skip}
             onLoadedMetadata={(e) => {
               setDuration(e.currentTarget.duration);
               if (initialRange) seek(initialRange[0]);
@@ -263,7 +227,11 @@ export function MatchDetail({
                 current={current}
                 events={events}
                 range={range}
-                bands={ranges.map((h, i) => ({ start: h.start, end: h.end, active: i === activeHighlight }))}
+                bands={ranges.map((h, i) => ({
+                  start: h.start,
+                  end: h.end,
+                  active: i === activeHighlight,
+                }))}
                 onSeek={(t) => {
                   playingRange.current = null;
                   seek(t);
@@ -279,42 +247,34 @@ export function MatchDetail({
                 }}
               />
             }
-            navTools={
-              <>
-                <span className="player-sep" />
-                <button className="player-btn" onClick={() => jump(-1)} title="上一個事件 ( , )">
-                  <IconPrev size={17} />
-                </button>
-                <button className="player-btn" onClick={() => jump(1)} title="下一個事件 ( . )">
-                  <IconNext size={17} />
-                </button>
-              </>
-            }
+            onEvent={jump}
             editTools={
               <>
-                <button className="player-btn text" onClick={() => setRange([current, null])} title="設為起點 ( I )">
-                  <IconMarkIn size={16} />
-                  {rin !== null ? <span className="num">{clock(rin)}</span> : "起點"}
-                </button>
                 <button
-                  className="player-btn text"
-                  onClick={() => setRange(([s]) => [s ?? 0, current])}
-                  title="設為終點 ( O )"
+                  className={`player-btn ${rin !== null ? "on" : ""}`}
+                  onClick={() => setRange([current, null])}
+                  title={rin !== null ? `起點 ${clock(rin)} · 按這裡改成目前位置 ( I )` : "設為起點 ( I )"}
                 >
-                  <IconMarkOut size={16} />
-                  {rout !== null ? <span className="num">{clock(rout)}</span> : "終點"}
+                  <IconMarkIn size={18} />
                 </button>
                 <button
-                  className="player-btn text"
+                  className={`player-btn ${rout !== null ? "on" : ""}`}
+                  onClick={() => setRange(([s]) => [s ?? 0, current])}
+                  title={rout !== null ? `終點 ${clock(rout)} · 按這裡改成目前位置 ( O )` : "設為終點 ( O )"}
+                >
+                  <IconMarkOut size={18} />
+                </button>
+                <button
+                  className="player-btn"
                   disabled={busy || rin === null || rout === null || rout <= rin}
                   onClick={() => rin !== null && rout !== null && exportRange(rin, rout)}
-                  title="把選取的這段存成影片檔"
+                  title={rin !== null && rout !== null ? `匯出 ${clock(rin)} – ${clock(rout)} 成影片檔` : "匯出選取的片段(先設起點與終點)"}
                 >
-                  <IconScissors size={16} /> 匯出
+                  <IconScissors size={18} />
                 </button>
                 {rin !== null && (
-                  <button className="player-btn text" onClick={() => setRange([null, null])} title="清除起終點">
-                    清除
+                  <button className="player-btn" onClick={() => setRange([null, null])} title="清除起終點">
+                    <IconX size={18} />
                   </button>
                 )}
                 <span className="player-sep" />

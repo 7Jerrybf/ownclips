@@ -97,3 +97,9 @@ export function groupByDay<T>(items: T[], startedAt: (item: T) => string): { key
   }
   return [...groups].sort(([a], [b]) => b.localeCompare(a)).map(([key, items]) => ({ key, items }));
 }
+
+/** ms since the epoch -> "2026-10-21 19:29:38" in local time (like a match's started_at). */
+export function stampOf(ms: number): string {
+  const d = new Date(ms);
+  return `${localKey(d)} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}

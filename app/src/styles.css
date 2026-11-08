@@ -567,10 +567,29 @@ button {
   height: 18px;
 }
 .player-row {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 8px;
+}
+.player-side {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
   gap: 2px;
+  min-width: 0;
+}
+.player-side.end {
+  justify-content: flex-end;
+}
+.player-transport {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.player-btn.play {
+  min-width: 42px;
+  height: 42px;
+  border-radius: 50%;
 }
 .player-btn {
   display: inline-flex;
@@ -605,7 +624,6 @@ button {
   display: flex;
   align-items: center;
   gap: 2px;
-  margin-left: auto;
 }
 .player-hint {
   display: flex;

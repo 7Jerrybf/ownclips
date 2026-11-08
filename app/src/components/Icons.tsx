@@ -166,3 +166,8 @@ export const IconMarkOut = (p: P) => (
     <path d="M14 4h4v16h-4M4 12h6M7 9l3 3-3 3" />
   </Svg>
 );
+export const IconX = (p: P) => (
+  <Svg {...p}>
+    <path d="M6 6l12 12M18 6 6 18" />
+  </Svg>
+);
