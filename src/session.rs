@@ -264,7 +264,7 @@ impl AutoRecorder {
             info,
             recorder,
             kills: RowCounter::default(),
-            deaths: RowCounter::default(),
+            deaths: RowCounter::for_deaths(),
             assists: RowCounter::default(),
             last_generation: 0,
             stop_at: None,
@@ -412,7 +412,7 @@ pub fn reanalyze(video: &Path, mut progress: impl FnMut(f64)) -> Result<MatchInf
     let mut frames = ffmpeg.stdout.take().unwrap();
     let mut buf = vec![0u8; (w * h * 3) as usize];
     let row_h = killfeed::ROW_HEIGHT_FRAC * height as f32;
-    let (mut kills, mut deaths, mut assists) = (RowCounter::default(), RowCounter::default(), RowCounter::default());
+    let (mut kills, mut deaths, mut assists) = (RowCounter::default(), RowCounter::for_deaths(), RowCounter::default());
     let mut events = Vec::new();
     let duration = info.duration.unwrap_or(0.0);
     let mut i = 0u64;

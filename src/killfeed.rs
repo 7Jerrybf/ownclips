@@ -83,14 +83,25 @@ fn yellow_runs(row: &[Px], min_len: usize) -> Vec<(usize, usize)> {
     out
 }
 
+/// Where a killfeed row's killer team color gives way to the victim's.
+/// Rows are right-aligned, so this is fixed by what is right of it (the
+/// victim's name and portrait): it stays put while the row moves up the
+/// feed, and differs between most rows. (Measured stable to a pixel or two;
+/// the bar's left end, by contrast, wanders with the portrait art.)
+pub type RowSig = usize;
+
 /// Rows of one kind (local player as killer, or as victim) on screen.
 #[derive(Default, Clone)]
 pub struct SelfRows {
     pub count: usize,
     /// Each row's top and bottom scanline.
     pub rows: Vec<(usize, usize)>,
+    /// Each row's signature (same order as `rows`).
+    pub sigs: Vec<RowSig>,
     /// Whether one of those rows is the bottom (newest) row of the feed.
     pub newest: bool,
+    /// Detection image row height, for comparing signatures.
+    pub row_h: f32,
 }
 
 pub struct KillfeedScan {
@@ -244,17 +255,81 @@ pub fn scan(img: &RgbImage, row_h: f32) -> KillfeedScan {
     // New rows are appended at the bottom of the feed, so the lowest
     // scanline that is mostly row background marks the newest row.
     let feed_bottom = (0..h).rev().find(|&y| bar_count(y, 0..w) >= 2.0 * row_h);
-    let summarize = |rows: &[(usize, usize)]| SelfRows {
-        count: rows.len(),
-        rows: rows.to_vec(),
-        newest: feed_bottom.is_some_and(|fb| rows.iter().any(|&(_, y1)| y1 as f32 + 0.5 * row_h >= fb as f32)),
+    // The local player's team is teal: on the killer side for kills and
+    // assists, on the victim side for deaths.
+    // Rows whose signature can't be measured (not two-toned the right way
+    // round) aren't the local player's.
+    let summarize = |rows: &[(usize, usize)], ally_left: bool| {
+        let (rows, sigs): (Vec<_>, Vec<_>) = rows
+            .iter()
+            .filter_map(|&(y0, y1)| Some(((y0, y1), row_sig(&grid, (y0 + y1) / 2, row_h, ally_left)?)))
+            .unzip();
+        SelfRows {
+            count: rows.len(),
+            newest: feed_bottom.is_some_and(|fb| rows.iter().any(|&(_, y1)| y1 as f32 + 0.5 * row_h >= fb as f32)),
+            rows,
+            sigs,
+            row_h,
+        }
     };
 
     KillfeedScan {
-        kills: summarize(&kill_rows),
-        deaths: summarize(&death_rows),
-        assists: summarize(&assist_rows),
+        kills: summarize(&kill_rows, true),
+        deaths: summarize(&death_rows, false),
+        assists: summarize(&assist_rows, true),
     }
+}
+
+/// Measures the signature (see `RowSig`) of the row centred on scanline `ym`, from the
+/// middle half of its height (text and icons are white, so columns are
+/// judged by majority). `ally_left`: teal on the left, red on the right.
+fn row_sig(grid: &[Vec<Px>], ym: usize, row_h: f32, ally_left: bool) -> Option<RowSig> {
+    let h = grid.len();
+    let w = grid.first()?.len();
+    let half = (0.25 * row_h).max(1.0) as usize;
+    let band = ym.saturating_sub(half)..(ym + half + 1).min(h);
+    let n = band.len() as f32;
+    let (mut teal, mut red) = (vec![0f32; w], vec![0f32; w]);
+    for y in band {
+        for x in 0..w {
+            match grid[y][x] {
+                Px::Teal => teal[x] += 1.0,
+                Px::Red => red[x] += 1.0,
+                _ => {}
+            }
+        }
+    }
+    // The bar runs from its left end to the region's right edge; a column
+    // counts as bar when most of the band is bar color.
+    let is_bar = |x: usize| teal[x] + red[x] >= 0.5 * n;
+    // The bar's left end: the first bar column with the bar continuing for
+    // a while after it (not a stray teal patch of map).
+    let run = (row_h as usize).max(4);
+    let left = (0..w.saturating_sub(run)).find(|&x| (x..x + run).filter(|&i| is_bar(i)).count() * 4 >= run * 3)?;
+    // Split where the most columns agree: killer color left, victim right.
+    let (l_px, r_px) = if ally_left { (&teal, &red) } else { (&red, &teal) };
+    let mut score: f32 = (left..w).map(|x| r_px[x]).sum();
+    let (mut best, mut split) = (score, left);
+    for x in left..w {
+        score += l_px[x] - r_px[x];
+        if score > best {
+            best = score;
+            split = x + 1;
+        }
+    }
+    // A row with the local player in it is two-toned: mostly the killer's
+    // color left of the split and the victim's right of it. Rows between
+    // two other players (all red in Deathmatch) that a yellow-ish portrait
+    // made look like ours are not.
+    let side = |xs: std::ops::Range<usize>| -> (f32, f32) {
+        xs.fold((0.0, 0.0), |(a, b), x| (a + l_px[x], b + r_px[x]))
+    };
+    let ((l_own, l_other), (r_other, r_own)) = (side(left..split), side(split..w));
+    let min = 0.5 * row_h * n;
+    if l_own < min || r_own < min || l_own < 2.0 * l_other || r_own < 2.0 * r_other {
+        return None;
+    }
+    Some(split)
 }
 
 /// Every row with the local player in it pairs an ally with an enemy, so
@@ -298,42 +373,88 @@ fn lime_death_rows(img: &RgbImage, grid: &[Vec<Px>], bar_runs: &[(usize, usize)]
     rows
 }
 
-/// Turns per-poll row counts into discrete events: an event is counted
-/// whenever the number of rows rises above the recent maximum, which
-/// tolerates rows lingering for several seconds, shifting position as new
-/// ones arrive, and the occasional poll where detection misses.
+/// Turns the rows seen on each poll into discrete events by following
+/// each row from poll to poll. A row on screen is the same as a remembered
+/// one when their signatures match and it isn't clearly lower than where
+/// that row was last seen (rows move up the feed, new ones enter at the
+/// bottom; at most a row drops a little when one is slotted in above it). Rows are remembered until gone for `FORGET` seconds, so a
+/// row is counted once however often detection loses and regains it (rows
+/// flicker in and out, and live frames can be seconds apart) and however
+/// far up the feed it moves.
 ///
-/// A row hidden for longer (e.g. under another app's overlay) would still
-/// re-count once it reappears, by then pushed up the feed. New rows always
-/// enter at the bottom, so an increase from a row that is not the newest is
-/// only trusted when nothing was counted within a row's on-screen lifetime.
+/// The position check is what tells the local player's deaths apart:
+/// their signatures all match (the victim side is always the player's own
+/// name and portrait).
 ///
 /// Times are seconds into the recording, so a recording can be re-analyzed
 /// offline with the same results.
-#[derive(Default)]
 pub struct RowCounter {
-    recent: Vec<(usize, f64)>,
-    last_counted: Option<f64>,
+    known: Vec<Known>,
+    /// How much lower than last seen a row may appear and still be the
+    /// same one, in row heights.
+    lower: f32,
 }
 
-const COUNT_MEMORY: f64 = 1.5;
-const ROW_LIFETIME: f64 = 7.0;
+impl Default for RowCounter {
+    /// For kills and assists, whose signatures name the victim: a row can
+    /// drop a little when Valorant slots in a row above it.
+    fn default() -> Self {
+        Self { known: Vec::new(), lower: 1.5 }
+    }
+}
 
+struct Known {
+    sig: RowSig,
+    /// Top scanline when last seen.
+    y: usize,
+    last_seen: f64,
+}
+
+/// A row stays up for about 5 s; detection can lose it for a few seconds
+/// in between. One seen again after this long is new.
+const FORGET: f64 = 6.0;
+/// Signature tolerance, in row heights.
+const SIG_TOLERANCE: f32 = 0.35;
 impl RowCounter {
+    /// For the local player's deaths, whose signatures all match: position
+    /// is all that tells them apart, so only detection jitter is allowed.
+    pub fn for_deaths() -> Self {
+        Self { known: Vec::new(), lower: 0.5 }
+    }
+
     /// Feeds the rows seen at time `t`; returns how many new events they
     /// represent.
     pub fn update(&mut self, rows: &SelfRows, t: f64) -> usize {
-        self.recent.retain(|&(_, seen)| t - seen < COUNT_MEMORY);
-        let prev = self.recent.iter().map(|(c, _)| *c).max().unwrap_or(0);
-        self.recent.push((rows.count, t));
-        if rows.count <= prev {
-            return 0;
+        self.known.retain(|k| t - k.last_seen < FORGET);
+        let row_h = rows.row_h.max(1.0);
+        let mut seen: Vec<(usize, RowSig)> = rows.rows.iter().map(|&(y0, _)| y0).zip(rows.sigs.iter().copied()).collect();
+        // Top to bottom, each taking the lowest remembered row it can be:
+        // the order of rows in the feed never changes.
+        seen.sort_unstable();
+        let mut taken = vec![false; self.known.len()];
+        let mut new = 0;
+        for (y, sig) in seen {
+            let candidate = (0..self.known.len())
+                .filter(|&i| {
+                    let k = &self.known[i];
+                    !taken[i]
+                        && (k.sig as f32 - sig as f32).abs() <= SIG_TOLERANCE * row_h
+                        && y as f32 <= k.y as f32 + self.lower * row_h
+                })
+                .min_by_key(|&i| self.known[i].y);
+            match candidate {
+                Some(i) => {
+                    taken[i] = true;
+                    let k = &mut self.known[i];
+                    (k.sig, k.y, k.last_seen) = (sig, y, t);
+                }
+                None => {
+                    new += 1;
+                    self.known.push(Known { sig, y, last_seen: t });
+                    taken.push(true);
+                }
+            }
         }
-        let recently_counted = self.last_counted.is_some_and(|c| t - c < ROW_LIFETIME);
-        if !rows.newest && recently_counted {
-            return 0; // an already-counted row resurfacing higher up the feed
-        }
-        self.last_counted = Some(t);
-        rows.count - prev
+        new
     }
 }

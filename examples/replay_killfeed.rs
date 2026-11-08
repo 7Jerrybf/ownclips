@@ -13,9 +13,12 @@ fn main() {
     if let Some(png) = std::env::args().nth(1).filter(|a| a.ends_with(".png")) {
         let game_h: f32 = std::env::args().nth(2).and_then(|a| a.parse().ok()).unwrap_or(1440.0);
         let s = killfeed::scan(&image::open(png).unwrap().into_rgb8(), killfeed::ROW_HEIGHT_FRAC * game_h);
-        println!("kills {:?}
-deaths {:?}
-assists {:?}", s.kills.rows, s.deaths.rows, s.assists.rows);
+        println!(
+            "kills {:?} {:?}
+deaths {:?} {:?}
+assists {:?} {:?}",
+            s.kills.rows, s.kills.sigs, s.deaths.rows, s.deaths.sigs, s.assists.rows, s.assists.sigs
+        );
         return;
     }
     let args: Vec<f32> = std::env::args().skip(1).map(|a| a.parse().expect("number")).collect();
@@ -25,21 +28,42 @@ assists {:?}", s.kills.rows, s.deaths.rows, s.assists.rows);
     let mut buf = vec![0u8; (w * h * 3) as usize];
     let mut stdin = std::io::stdin().lock();
     let mut out = BufWriter::new(std::io::stdout().lock());
-    writeln!(out, "t,kills,kills_newest,deaths,deaths_newest,assists,assists_newest").unwrap();
+    // With EVENTS=1, print only the counted events (as the app would log them).
+    let events_only = std::env::var("EVENTS").is_ok();
+    let mut counters = [killfeed::RowCounter::default(), killfeed::RowCounter::for_deaths(), killfeed::RowCounter::default()];
+    if !events_only {
+        writeln!(out, "t,kills,kills_newest,deaths,deaths_newest,assists,assists_newest,kill_sigs,death_sigs").unwrap();
+    }
     let mut i = 0u64;
     while stdin.read_exact(&mut buf).is_ok() {
         let img = image::RgbImage::from_raw(w, h, buf.clone()).unwrap();
         let s = killfeed::scan(&img, row_h);
+        let t = i as f64 / fps as f64;
+        if events_only {
+            for (name, rows, c) in
+                [("kill", &s.kills, 0), ("death", &s.deaths, 1), ("assist", &s.assists, 2)]
+            {
+                for _ in 0..counters[c].update(rows, t) {
+                    writeln!(out, "{t:.2} {name}").unwrap();
+                }
+            }
+            i += 1;
+            continue;
+        }
         writeln!(
             out,
-            "{:.2},{},{},{},{},{},{}",
+            "{:.2},{},{},{},{},{},{},{:?},{:?},{:?},{:?}",
             i as f32 / fps,
             s.kills.count,
             s.kills.newest as u8,
             s.deaths.count,
             s.deaths.newest as u8,
             s.assists.count,
-            s.assists.newest as u8
+            s.assists.newest as u8,
+            s.kills.sigs,
+            s.deaths.sigs,
+            s.kills.rows,
+            s.deaths.rows
         )
         .unwrap();
         i += 1;
