@@ -48,6 +48,19 @@ pub struct Config {
     pub storage_limit_gb: Option<u32>,
     /// Global shortcut that starts and stops manual recording; None turns it off.
     pub manual_hotkey: Option<String>,
+    /// Record any game in the foreground (see gamedetect.rs), not only the
+    /// games whose matches are followed.
+    pub auto_detect_games: bool,
+    /// Programs that are (or aren't) games whatever the detection says.
+    pub game_rules: Vec<GameRule>,
+}
+
+/// The user's word on whether a program is a game to record.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct GameRule {
+    /// The program's file name, e.g. "eldenring.exe".
+    pub exe: String,
+    pub record: bool,
 }
 
 /// Where the killfeed sits with Valorant's default HUD on a 16:9 screen
@@ -73,6 +86,8 @@ impl Default for Config {
             close_to_tray: true,
             storage_limit_gb: None,
             manual_hotkey: Some("Ctrl+Alt+F9".to_string()),
+            auto_detect_games: true,
+            game_rules: Vec::new(),
         }
     }
 }

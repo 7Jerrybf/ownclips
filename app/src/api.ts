@@ -70,6 +70,15 @@ export interface Config {
   close_to_tray: boolean;
   storage_limit_gb: number | null;
   manual_hotkey: string | null;
+  /** Record any game in the foreground, not only Valorant and League matches. */
+  auto_detect_games: boolean;
+  game_rules: GameRule[];
+}
+
+/** Whether a program (by file name, e.g. "eldenring.exe") is a game to record. */
+export interface GameRule {
+  exe: string;
+  record: boolean;
 }
 
 export interface RecorderStatus {

@@ -124,7 +124,7 @@ pub fn find_game_window(game: Game) -> Result<Window> {
         // The match itself, not the lobby client ("League of Legends").
         Game::League => Window::from_contains_name("League of Legends (TM) Client")
             .map_err(|e| anyhow!("找不到英雄聯盟的遊戲視窗: {e}")),
-        Game::Other => Err(anyhow!("手動錄影要自己選視窗")),
+        Game::Other => Err(anyhow!("沒有固定的遊戲視窗")),
     }
 }
 
@@ -185,7 +185,10 @@ fn recordable(w: &Window) -> Option<WindowInfo> {
     if w.process_id().ok()? == std::process::id() || w.rect().ok()?.left <= -32000 || is_cloaked(w) {
         return None;
     }
-    Some(WindowInfo { hwnd: w.as_raw_hwnd() as usize, title, process: w.process_name().unwrap_or_default() })
+    let hwnd = w.as_raw_hwnd() as usize;
+    // Games guarded by an anti-cheat only give their name to the lighter query.
+    let process = crate::gamedetect::exe_name(hwnd).or_else(|| w.process_name().ok()).unwrap_or_default();
+    Some(WindowInfo { hwnd, title, process })
 }
 
 /// A screen that can be recorded.

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { AudioDevice, AudioMode, Config, StorageUsage, VideoCodec, VideoQuality } from "../api";
 import { api } from "../api";
 import { Calibration } from "./Calibration";
+import { GameRules } from "./GameRules";
 import { HotkeyField } from "./HotkeyField";
 import { size } from "../format";
 import { IconFolder } from "./Icons";
@@ -348,6 +349,24 @@ export function SettingsView({
               </button>
             </div>
           </div>
+        </div>
+
+        <div className="section-title">遊戲偵測</div>
+        <div className="section">
+          <div className="field">
+            <div className="field-label">
+              <b>自動錄其他遊戲</b>
+              <span>遊戲在前景時開始,關閉遊戲或離開 3 分鐘後停止 · Valorant、英雄聯盟照常按對局錄</span>
+            </div>
+            <button
+              className={`switch ${cfg.auto_detect_games ? "on" : ""}`}
+              aria-pressed={cfg.auto_detect_games}
+              onClick={() => set("auto_detect_games", !cfg.auto_detect_games)}
+            />
+          </div>
+          {cfg.auto_detect_games && (
+            <GameRules rules={cfg.game_rules} onChange={(rules) => set("game_rules", rules)} notify={notify} />
+          )}
         </div>
 
         <div className="section-title">儲存空間</div>

@@ -1311,6 +1311,17 @@ button {
   color: var(--faint);
   font-size: 12px;
 }
+.window-item.row {
+  flex-direction: row;
+  align-items: baseline;
+  gap: 12px;
+  width: 100%;
+  padding: 9px 16px;
+  border-radius: 0;
+}
+.window-item.row .window-title {
+  flex: 1;
+}
 .window-hint {
   padding: 12px 18px;
   color: var(--muted);

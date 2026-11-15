@@ -26,7 +26,8 @@ pub enum Game {
     #[default]
     Valorant,
     League,
-    /// Recorded by hand from any window: nothing reports events or its end.
+    /// Any other window: recorded by hand, or a game noticed in the
+    /// foreground (gamedetect.rs). Nothing reports events or a match's end.
     Other,
 }
 

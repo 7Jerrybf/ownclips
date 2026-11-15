@@ -11,6 +11,9 @@
 // the command line or from the app's background thread. `reanalyze` runs
 // the detector again over a finished recording. `start_manual` records any
 // window on request instead, until `stop_manual`; game events don't touch it.
+// Any other game in the foreground (gamedetect.rs) is recorded the same way,
+// from a few seconds after it comes to the front until its window closes or
+// it has been in the background for a while.
 use std::fs;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -26,6 +29,7 @@ use windows_capture::window::Window;
 use crate::capture;
 use crate::clip;
 use crate::config;
+use crate::gamedetect::{self, GameWatcher};
 use crate::gamestate::{self, Game, GameEvent, LogWatcher};
 use crate::killfeed::{self, RowCounter};
 use crate::league::LeagueWatcher;
@@ -39,6 +43,14 @@ const END_TAIL: Duration = Duration::from_secs(6);
 const MIN_MATCH_SECONDS: f64 = 20.0;
 /// The `mode` of recordings made by hand.
 const MANUAL_MODE: &str = "錄影";
+/// The `mode` of recordings of a game noticed in the foreground.
+pub const GAME_MODE: &str = "遊戲";
+/// A game must stay in front this long before it is recorded, so passing
+/// through a game window doesn't start a recording.
+const GAME_START_DELAY: Duration = Duration::from_secs(5);
+/// A noticed game's recording ends once it has been out of the foreground
+/// this long.
+const GAME_BACKGROUND_STOP: Duration = Duration::from_secs(180);
 /// Window titles (a manual recording's `map`) are cut to this many characters.
 const MAX_TITLE_CHARS: usize = 40;
 
@@ -116,11 +128,23 @@ struct ActiveMatch {
     assists: RowCounter,
     last_generation: u64,
     stop_at: Option<Instant>,
+    /// The window being recorded, unless it's a screen.
+    window: Option<usize>,
+    /// A game noticed in the foreground, not a followed match or a manual recording.
+    noticed: bool,
+    /// When the noticed game was last in front.
+    last_front: Instant,
 }
 
 pub struct AutoRecorder {
     log: LogWatcher,
     league: LeagueWatcher,
+    games: GameWatcher,
+    /// A game in front that isn't recorded yet, and since when.
+    pending_game: Option<(usize, Instant)>,
+    /// A game window not to record again: the user stopped its recording,
+    /// or recording it failed.
+    dismissed: Option<usize>,
     current: Option<ActiveMatch>,
     /// Background work (muxing, clipping) reports back through here.
     done_tx: Sender<Notice>,
@@ -131,7 +155,17 @@ pub struct AutoRecorder {
 impl AutoRecorder {
     pub fn new() -> Result<Self> {
         let (done_tx, done_rx) = mpsc::channel();
-        let mut auto = Self { log: LogWatcher::new()?, league: LeagueWatcher::new(), current: None, done_tx, done_rx, jobs: Vec::new() };
+        let mut auto = Self {
+            log: LogWatcher::new()?,
+            league: LeagueWatcher::new(),
+            games: GameWatcher::new(),
+            pending_game: None,
+            dismissed: None,
+            current: None,
+            done_tx,
+            done_rx,
+            jobs: Vec::new(),
+        };
         auto.recover();
         Ok(auto)
     }
@@ -170,13 +204,15 @@ impl AutoRecorder {
             }
             match event {
                 GameEvent::MatchStarted { map, mode } => {
-                    if self.current.is_some() {
+                    if self.current.as_ref().is_some_and(|m| !m.noticed) {
                         continue;
                     }
                     if gamestate::is_practice(&mode) {
                         notices.push(Notice::Skipped { reason: format!("{mode}不錄影") });
                         continue;
                     }
+                    // A match comes before a game left running in the background.
+                    notices.extend(self.finish_match());
                     let started = capture::find_game_window(game)
                         .and_then(|w| self.start_match(game, Target::Window(w.as_raw_hwnd() as usize), map.clone(), mode.clone()));
                     match started {
@@ -198,6 +234,7 @@ impl AutoRecorder {
             }
         }
 
+        notices.extend(self.watch_games());
         if let Some(m) = &mut self.current {
             notices.extend(detect(m));
             if m.game == Game::Other && m.recorder.window_closed() {
@@ -210,6 +247,58 @@ impl AutoRecorder {
             }
         }
         notices
+    }
+
+    /// Records a game that stays in the foreground, and ends that recording
+    /// once the game has been in the background for a while.
+    fn watch_games(&mut self) -> Vec<Notice> {
+        let Some(front) = self.games.poll() else { return Vec::new() };
+        if self.dismissed.is_some_and(|hwnd| !gamedetect::window_exists(hwnd)) {
+            self.dismissed = None;
+        }
+        let front = front.filter(|g| Some(g.hwnd) != self.dismissed);
+        if let Some(m) = &mut self.current {
+            if !m.noticed {
+                return Vec::new();
+            }
+            if front.is_some_and(|g| Some(g.hwnd) == m.window) {
+                m.last_front = Instant::now();
+            } else if m.last_front.elapsed() >= GAME_BACKGROUND_STOP {
+                return self.finish_match();
+            }
+            return Vec::new();
+        }
+        let Some(game) = front else {
+            self.pending_game = None;
+            return Vec::new();
+        };
+        match self.pending_game {
+            Some((hwnd, since)) if hwnd == game.hwnd => {
+                if since.elapsed() < GAME_START_DELAY {
+                    return Vec::new();
+                }
+            }
+            _ => {
+                self.pending_game = Some((game.hwnd, Instant::now()));
+                return Vec::new();
+            }
+        }
+        self.pending_game = None;
+        let mode = GAME_MODE.to_string();
+        match self.start_match(Game::Other, Target::Window(game.hwnd), game.name.clone(), mode.clone()) {
+            Ok(video) => {
+                if let Some(m) = &mut self.current {
+                    m.noticed = true;
+                }
+                // Stopped by hand like a manual recording.
+                vec![Notice::Started { video, map: game.name, mode, manual: true }]
+            }
+            Err(e) => {
+                // Don't try again every few seconds.
+                self.dismissed = Some(game.hwnd);
+                vec![Notice::Error(format!("開始錄影失敗: {e:#}"))]
+            }
+        }
     }
 
     /// Starts recording a window or a screen by hand; only `stop_manual` (or
@@ -232,12 +321,15 @@ impl AutoRecorder {
         }
     }
 
-    /// Ends a manual recording; an automatic one keeps going.
+    /// Ends a manual recording or that of a noticed game; a followed match
+    /// keeps going. The window isn't recorded again by itself.
     pub fn stop_manual(&mut self) -> Vec<Notice> {
-        if self.current.as_ref().is_some_and(|m| m.game == Game::Other) {
-            self.finish_match()
-        } else {
-            Vec::new()
+        match &self.current {
+            Some(m) if m.game == Game::Other => {
+                self.dismissed = m.window.or(self.dismissed);
+                self.finish_match()
+            }
+            _ => Vec::new(),
         }
     }
 
@@ -273,6 +365,12 @@ impl AutoRecorder {
             assists: RowCounter::default(),
             last_generation: 0,
             stop_at: None,
+            window: match target {
+                Target::Window(hwnd) => Some(hwnd),
+                Target::Monitor(_) => None,
+            },
+            noticed: false,
+            last_front: Instant::now(),
         });
         Ok(video)
     }
@@ -286,7 +384,7 @@ impl AutoRecorder {
         };
         // A few seconds with nothing in it is a false start, not a match. A
         // short manual recording was asked for, but without frames there's no video.
-        let min_seconds = if m.game == Game::Other { 0.0 } else { MIN_MATCH_SECONDS };
+        let min_seconds = if m.game == Game::Other && !m.noticed { 0.0 } else { MIN_MATCH_SECONDS };
         if m.info.duration.is_none_or(|d| d < min_seconds) && m.info.events.is_empty() {
             stopped.discard();
             let _ = fs::remove_file(MatchInfo::path_for(&m.video));
@@ -500,6 +598,9 @@ pub fn run() -> Result<()> {
     let quit2 = quit.clone();
     ctrlc::set_handler(move || quit2.store(true, std::sync::atomic::Ordering::Relaxed))?;
     println!("等待 Valorant / 英雄聯盟對局開始...(會自動錄影,對局結束自動停止。按 Ctrl+C 結束)");
+    if cfg.auto_detect_games {
+        println!("其他遊戲在前景時也會自動錄影,關閉遊戲後停止。");
+    }
     loop {
         let quitting = quit.load(std::sync::atomic::Ordering::Relaxed);
         let notices = if quitting { auto.shutdown() } else { auto.tick() };

@@ -154,7 +154,13 @@ fn apply_notice(app: &AppHandle, status: &Mutex<RecorderStatus>, notice: Notice)
                     started_at: Some(now_ms()),
                     ..Default::default()
                 };
-                let message = if manual { format!("錄影中 · {map}") } else { format!("對局開始,錄影中 · {mode} · {map}") };
+                let message = if mode == ownclips::session::GAME_MODE {
+                    format!("偵測到遊戲,錄影中 · {map}")
+                } else if manual {
+                    format!("錄影中 · {map}")
+                } else {
+                    format!("對局開始,錄影中 · {mode} · {map}")
+                };
                 Some(Toast { kind: "start".into(), message })
             }
             Notice::Event { kind, .. } => {
