@@ -3,7 +3,7 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 
 export type EventKind = "kill" | "death" | "assist";
 export type Game = "valorant" | "league" | "other";
-export type AudioMode = "game" | "system" | "game_and_mic" | "system_and_mic" | "off";
+export type AudioMode = "game" | "system" | "game_and_mic" | "system_and_mic";
 export type VideoCodec = "av1" | "h264";
 export type VideoQuality = "high" | "standard" | "small";
 
@@ -56,10 +56,17 @@ export interface Config {
   clip_pre_seconds: number;
   clip_post_seconds: number;
   audio_mode: AudioMode;
+  /** Microphone device id; null is Windows' default microphone. */
+  mic_device: string | null;
+  /** Loudness of the game / system audio and of the microphone, in percent. */
+  audio_volume: number;
+  mic_volume: number;
   video_fps: number;
   video_codec: VideoCodec;
   video_quality: VideoQuality;
   video_bitrate_mbps: number;
+  /** Output height (e.g. 1080); null records at the game's own size. */
+  video_height: number | null;
   close_to_tray: boolean;
   storage_limit_gb: number | null;
   manual_hotkey: string | null;
@@ -77,6 +84,23 @@ export interface RecorderStatus {
   assists: number;
   last_error: string | null;
 }
+
+export interface MonitorInfo {
+  hmonitor: number;
+  /** 1-based, as Windows numbers the displays. */
+  index: number;
+  name: string;
+  width: number;
+  height: number;
+}
+
+export interface AudioDevice {
+  id: string;
+  name: string;
+}
+
+/** What to record: a window (its hwnd) or a whole screen (its hmonitor). */
+export type RecordTarget = { kind: "window" | "monitor"; id: number };
 
 export interface WindowInfo {
   hwnd: number;
@@ -109,7 +133,10 @@ export interface Toast {
 export const api = {
   status: () => invoke<RecorderStatus>("get_status"),
   listWindows: () => invoke<WindowInfo[]>("list_windows"),
-  startManual: (hwnd: number) => invoke<void>("start_manual_recording", { hwnd }),
+  listMonitors: () => invoke<MonitorInfo[]>("list_monitors"),
+  monitorPreview: (hmonitor: number) => invoke<string | null>("monitor_preview", { hmonitor }),
+  listMicrophones: () => invoke<AudioDevice[]>("list_microphones"),
+  startManual: (target: RecordTarget) => invoke<void>("start_manual_recording", { target }),
   stopManual: () => invoke<void>("stop_manual_recording"),
   windowPreview: (hwnd: number) => invoke<string | null>("window_preview", { hwnd }),
   hotkeyError: () => invoke<string | null>("hotkey_error"),

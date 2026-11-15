@@ -18,6 +18,7 @@ use std::time::Duration;
 use base64::Engine as _;
 use ownclips::clip;
 use ownclips::config::{self, Config, RegionPct};
+use ownclips::recorder::Target;
 use ownclips::session::{AutoRecorder, EventKind, MatchInfo, Notice};
 use serde::Serialize;
 use tauri::image::Image;
@@ -61,7 +62,7 @@ struct Toast {
 
 /// What the UI asks of the auto recorder, which lives on its own thread.
 enum Request {
-    StartManual { hwnd: usize },
+    StartManual { target: Target },
     StopManual,
 }
 
@@ -100,7 +101,7 @@ fn start_background(app: AppHandle) -> Background {
             let wait = Duration::from_millis(if auto.is_recording() { 150 } else { 1000 });
             if let Ok(request) = incoming.recv_timeout(wait) {
                 let notices = match request {
-                    Request::StartManual { hwnd } => auto.start_manual(hwnd),
+                    Request::StartManual { target } => auto.start_manual(target),
                     Request::StopManual => auto.stop_manual(),
                 };
                 for n in notices {
@@ -153,7 +154,7 @@ fn apply_notice(app: &AppHandle, status: &Mutex<RecorderStatus>, notice: Notice)
                     started_at: Some(now_ms()),
                     ..Default::default()
                 };
-                let message = if manual { format!("手動錄影中 · {map}") } else { format!("對局開始,錄影中 · {mode} · {map}") };
+                let message = if manual { format!("錄影中 · {map}") } else { format!("對局開始,錄影中 · {mode} · {map}") };
                 Some(Toast { kind: "start".into(), message })
             }
             Notice::Event { kind, .. } => {
@@ -289,7 +290,7 @@ fn update_tray(app: &AppHandle, s: &RecorderStatus) {
     let Some(tray) = app.try_state::<Tray>() else { return };
     let recording = s.state == "recording";
     let text = if recording && s.manual {
-        format!("手動錄影中 · {}", s.map.as_deref().unwrap_or("?"))
+        format!("錄影中 · {}", s.map.as_deref().unwrap_or("?"))
     } else if recording {
         format!(
             "錄影中 · {} · {}  {}/{}/{}",
@@ -330,10 +331,21 @@ async fn list_windows() -> CmdResult<Vec<ownclips::capture::WindowInfo>> {
     tauri::async_runtime::spawn_blocking(|| ownclips::capture::list_windows().map_err(err)).await.map_err(err)?
 }
 
-/// Results arrive like those of automatic recordings: "recorder-status" and "toast" events.
 #[tauri::command]
-fn start_manual_recording(bg: State<Background>, hwnd: usize) -> CmdResult<()> {
-    bg.requests.send(Request::StartManual { hwnd }).map_err(err)
+async fn list_monitors() -> CmdResult<Vec<ownclips::capture::MonitorInfo>> {
+    tauri::async_runtime::spawn_blocking(|| ownclips::capture::list_monitors().map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+async fn list_microphones() -> CmdResult<Vec<ownclips::audio::AudioDevice>> {
+    tauri::async_runtime::spawn_blocking(|| ownclips::audio::list_microphones().map_err(err)).await.map_err(err)?
+}
+
+/// Records a window or a whole screen. Results arrive like those of
+/// automatic recordings: "recorder-status" and "toast" events.
+#[tauri::command]
+fn start_manual_recording(bg: State<Background>, target: Target) -> CmdResult<()> {
+    bg.requests.send(Request::StartManual { target }).map_err(err)
 }
 
 #[tauri::command]
@@ -346,6 +358,18 @@ fn stop_manual_recording(bg: State<Background>) -> CmdResult<()> {
 async fn window_preview(hwnd: usize) -> Option<String> {
     tauri::async_runtime::spawn_blocking(move || {
         let img = ownclips::capture::window_thumbnail(hwnd, 400).ok()?;
+        jpeg_data_url(&img, 75).ok()
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// A small image of a screen for the picker; None if it can't be captured.
+#[tauri::command]
+async fn monitor_preview(hmonitor: usize) -> Option<String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let img = ownclips::capture::monitor_thumbnail(hmonitor, 400).ok()?;
         jpeg_data_url(&img, 75).ok()
     })
     .await
@@ -372,7 +396,7 @@ fn toggle_manual(app: &AppHandle) {
     let request = if manual {
         Request::StopManual
     } else if let Some(w) = ownclips::capture::foreground_window() {
-        Request::StartManual { hwnd: w.hwnd }
+        Request::StartManual { target: Target::Window(w.hwnd) }
     } else {
         let message = "這個視窗不能錄影,切到要錄的視窗再按快捷鍵".to_string();
         let _ = app.emit("toast", Toast { kind: "error".into(), message });
@@ -831,6 +855,9 @@ fn main() {
             start_manual_recording,
             stop_manual_recording,
             window_preview,
+            list_monitors,
+            monitor_preview,
+            list_microphones,
             hotkey_error,
             set_manual_hotkey,
             get_config,

@@ -74,8 +74,8 @@ export function Calibration({
           <b>Killfeed 區域</b>
           <span>
             {region
-              ? `已校準 · 位置 ${(region.x * 100).toFixed(1)}%, ${(region.y * 100).toFixed(1)}% · 大小 ${(region.w * 100).toFixed(1)}% × ${(region.h * 100).toFixed(1)}%`
-              : "尚未校準:偵測擊殺前一定要先框出畫面右上角的擊殺提示區域"}
+              ? `已校準 · ${(region.w * 100).toFixed(0)}% × ${(region.h * 100).toFixed(0)}%`
+              : "未校準"}
           </span>
         </div>
         <button className="btn" disabled={busy} onClick={grab}>
@@ -86,7 +86,7 @@ export function Calibration({
       {frame && (
         <>
           <div className="warn" style={{ marginTop: 12 }}>
-            在畫面上拖曳,框住右上角的擊殺提示區(多框幾行的高度,讓 5~6 行擊殺都在框內)。
+            拖曳框住右上角擊殺提示(約 5~6 行)
           </div>
           <div
             ref={box}
@@ -117,7 +117,7 @@ export function Calibration({
             <canvas ref={canvas} />
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               <span style={{ color: "var(--muted)", fontSize: 13 }}>
-                左邊是放大預覽,確認擊殺提示完整在框內。
+                左:放大預覽
               </span>
               <div style={{ display: "flex", gap: 8 }}>
                 <button className="btn primary" disabled={!sel || sel.w < 0.02 || sel.h < 0.02} onClick={save}>

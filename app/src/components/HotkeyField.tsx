@@ -58,10 +58,7 @@ export function HotkeyField({
     <div className="field">
       <div className="field-label">
         <b>快捷鍵</b>
-        <span>
-          在任何視窗(包含全螢幕遊戲)按下就開始錄那個視窗,手動錄影中再按一次停止
-          {listening && " · 按下 Ctrl 或 Alt 加一個鍵,或單獨一個 F 鍵;Esc 取消"}
-        </span>
+        <span>{listening ? "Ctrl / Alt + 鍵,或 F 鍵 · Esc 取消" : "開始 / 停止錄目前視窗"}</span>
       </div>
       <div className="field-control">
         <button className={`btn ${listening ? "primary" : ""}`} onClick={() => setListening(!listening)}>

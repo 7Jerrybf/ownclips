@@ -47,9 +47,10 @@ fn record_test(secs: Option<&String>, name: Option<&String>, audio: Option<&Stri
     let mut settings = cfg.record_settings();
     if let Some(a) = audio {
         settings.audio = serde_json::from_value(serde_json::Value::String(a.clone()))
-            .map_err(|_| anyhow::anyhow!("聲音模式只能是 game / system / game_and_mic / system_and_mic / off"))?;
+            .map_err(|_| anyhow::anyhow!("聲音模式只能是 game / system / game_and_mic / system_and_mic"))?;
     }
-    let mut rec = recorder::Recorder::start(window, &path, settings)?;
+    let target = recorder::Target::Window(window.as_raw_hwnd() as usize);
+    let mut rec = recorder::Recorder::start(target, &path, settings)?;
     std::thread::sleep(std::time::Duration::from_secs(secs));
     if let Some(e) = rec.error() {
         println!("錄影中發生錯誤: {e}");

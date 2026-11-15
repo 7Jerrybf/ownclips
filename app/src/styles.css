@@ -144,6 +144,56 @@ button {
   border-color: rgba(255, 70, 85, 0.45);
   background: linear-gradient(180deg, rgba(255, 70, 85, 0.12), var(--panel-2));
 }
+/* The record button: a red dot that turns into a stop square. */
+.rec-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  height: 42px;
+  border-radius: 21px;
+  border: 1px solid var(--border-strong);
+  background: var(--panel-3);
+  color: var(--text);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.rec-btn:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.rec-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.rec-btn.on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+}
+.rec-btn kbd {
+  font: inherit;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--muted);
+}
+.rec-dot {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px rgba(255, 70, 85, 0.25);
+  flex: none;
+}
+.rec-dot.stop {
+  width: 13px;
+  height: 13px;
+  border-radius: 3px;
+  background: white;
+  box-shadow: none;
+}
 .status-head {
   display: flex;
   align-items: center;
@@ -181,6 +231,11 @@ button {
   color: var(--muted);
   font-size: 12px;
   overflow-wrap: anywhere;
+}
+.status-kd span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
 .status-kd {
   display: flex;
@@ -1057,6 +1112,15 @@ button {
   align-items: center;
   gap: 10px;
 }
+.select {
+  max-width: 300px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border-strong);
+  background: var(--panel-2);
+  color: var(--text);
+  font: inherit;
+}
 .range-wrap {
   display: flex;
   align-items: center;
@@ -1113,33 +1177,6 @@ button {
 }
 .switch.on::after {
   transform: translateX(18px);
-}
-.audio-options {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 10px;
-  padding: 16px 0;
-  border-bottom: 1px solid var(--border);
-}
-.audio-option {
-  border: 1px solid var(--border);
-  background: var(--panel-2);
-  border-radius: 10px;
-  padding: 12px 14px;
-  cursor: pointer;
-  text-align: left;
-}
-.audio-option b {
-  display: block;
-  margin-bottom: 2px;
-}
-.audio-option span {
-  color: var(--muted);
-  font-size: 12px;
-}
-.audio-option.on {
-  border-color: var(--accent);
-  background: var(--accent-soft);
 }
 .warn {
   color: var(--assist);
@@ -1214,12 +1251,21 @@ button {
 .modal.window-picker {
   width: min(760px, 92vw);
 }
+.picker-scroll {
+  max-height: 68vh;
+  overflow-y: auto;
+  padding-bottom: 10px;
+}
+.picker-group {
+  padding: 6px 16px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
 .window-list {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
   gap: 4px;
-  max-height: 60vh;
-  overflow-y: auto;
   padding: 0 8px;
 }
 .window-preview {
@@ -1374,12 +1420,34 @@ button {
 
 /* ---------- selecting matches ---------- */
 
-.select-bar {
-  margin-left: auto;
+/* Card boxes show on hover, and on every card once something is picked. */
+.card-check {
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.card:hover .card-check,
+.card.picked .card-check,
+.selecting .card-check {
+  opacity: 1;
+}
+.select-float {
+  position: sticky;
+  bottom: 16px;
+  z-index: 5;
+  width: fit-content;
+  margin: 24px auto 0;
   display: flex;
   align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
+  gap: 12px;
+  padding: 8px 10px 8px 14px;
+  border-radius: 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--border-strong);
+  box-shadow: var(--shadow);
+}
+.select-float .icon-btn {
+  width: 28px;
+  height: 28px;
 }
 .check {
   display: inline-flex;

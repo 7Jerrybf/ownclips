@@ -31,7 +31,7 @@ use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use windows_capture::window::Window;
 
-use crate::audio::{self, AudioMode, AudioRecorder};
+use crate::audio::{self, AudioMode, AudioOptions, AudioRecorder};
 use crate::capture::{self, Control, SharedSink};
 use crate::clip;
 use crate::config::RegionPct;
@@ -46,14 +46,28 @@ fn video_start_bias_ticks(fps: u32) -> i64 {
     (secs * qpc::TICKS_PER_SEC) as i64
 }
 
-#[derive(Clone, Copy)]
+/// What gets recorded: one window, or a whole screen.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(tag = "kind", content = "id", rename_all = "snake_case")]
+pub enum Target {
+    /// A window handle (HWND).
+    Window(usize),
+    /// A screen handle (HMONITOR).
+    Monitor(usize),
+}
+
+#[derive(Clone)]
 pub struct RecordSettings {
     pub fps: u32,
     /// H.264 bitrate (AV1 uses `quality`).
     pub bitrate_mbps: u32,
     pub codec: VideoCodec,
     pub quality: VideoQuality,
+    /// Downscale to this height; None (or anything not smaller than the
+    /// window) keeps the window's own size.
+    pub height: Option<u32>,
     pub audio: AudioMode,
+    pub audio_options: AudioOptions,
     /// Window region the killfeed detector watches; None captures no
     /// detection frames.
     pub detect_region: Option<RegionPct>,
@@ -104,15 +118,28 @@ pub struct Recorder {
 }
 
 impl Recorder {
-    /// Starts recording `window`; the finished file will be `mp4`.
-    pub fn start(window: Window, mp4: &Path, settings: RecordSettings) -> Result<Self> {
+    /// Starts recording `target`; the finished file will be `mp4`.
+    pub fn start(target: Target, mp4: &Path, settings: RecordSettings) -> Result<Self> {
         let files = Files::for_output(mp4);
         let encoder = pick_encoder(settings.codec)?;
-        let hwnd = window.as_raw_hwnd() as usize;
-        let pid = window.process_id().map_err(|e| anyhow!("讀取遊戲程序 ID 失敗: {e}"))?;
+        // What gfxcapture records, the source's size, and whose audio the
+        // game modes capture. A screen recording shows the mouse pointer.
+        let (source, size, pid) = match target {
+            Target::Window(hwnd) => {
+                let window = Window::from_raw_hwnd(hwnd as *mut std::ffi::c_void);
+                let pid = window.process_id().map_err(|e| anyhow!("讀取遊戲程序 ID 失敗: {e}"))?;
+                (format!("hwnd={hwnd}:capture_cursor=0"), capture::client_size(hwnd), Some(pid))
+            }
+            Target::Monitor(hmonitor) => {
+                let m = capture::monitor(hmonitor);
+                let size = (m.width > 0 && m.height > 0).then_some((m.width, m.height));
+                (format!("hmonitor={hmonitor}:capture_cursor=1"), size, None)
+            }
+        };
 
         let audio_start = qpc::now();
-        let audio = AudioRecorder::start(settings.audio, pid, audio_start, &files.pcm)?;
+        let audio =
+            AudioRecorder::start(settings.audio, &settings.audio_options, pid, audio_start, &files.pcm)?;
         save_meta(&files, RecMeta { audio_start, video_start: None, fps: settings.fps });
 
         // Capture at the display's own pace and let the fps filter pick the
@@ -120,8 +147,10 @@ impl Recorder {
         // itself to the target rate instead lands frames on multiples of the
         // refresh interval (e.g. 6.06 ms at 165 Hz), giving uneven spacing.
         let filter = format!(
-            "gfxcapture=hwnd={hwnd}:max_framerate=240:capture_cursor=0:width=-2:height=-2,fps={}{}",
-            settings.fps, encoder.filter
+            "gfxcapture={source}:max_framerate=240:{},fps={}{}",
+            capture_size(size, settings.height),
+            settings.fps,
+            encoder.filter
         );
         let mut cmd = clip::ffmpeg()?;
         cmd.args(["-hide_banner", "-loglevel", "warning", "-stats_period", "0.1", "-progress", "pipe:2"])
@@ -140,13 +169,13 @@ impl Recorder {
         let (vs, lg, ffmpeg_pid) = (video_start.clone(), log.clone(), ffmpeg.id());
         thread::spawn(move || read_progress(stderr, ffmpeg_pid, &vs, &lg));
 
-        let (detect, sink) = match settings.detect_region {
-            Some(region) => {
+        let (detect, sink) = match (settings.detect_region, target) {
+            (Some(region), Target::Window(hwnd)) => {
                 let detect_window = Window::from_raw_hwnd(hwnd as *mut std::ffi::c_void);
                 let (c, s) = capture::start_capture_every(detect_window, Some(DETECT_FRAME_INTERVAL), Some(region))?;
                 (Some(c), s)
             }
-            None => (None, SharedSink::default()),
+            _ => (None, SharedSink::default()),
         };
 
         Ok(Self {
@@ -382,6 +411,20 @@ struct Encoder {
     /// Appended to the capture filter (e.g. download + colour conversion).
     filter: &'static str,
     args: fn(&RecordSettings) -> Vec<String>,
+}
+
+/// gfxcapture's output size: the source's own (rounded to even), or scaled
+/// on the GPU to `height` keeping the aspect ratio. `size` is the source's.
+fn capture_size(size: Option<(u32, u32)>, height: Option<u32>) -> String {
+    const SOURCE: &str = "width=-2:height=-2";
+    let (Some(h), Some((cw, ch))) = (height, size) else {
+        return SOURCE.into();
+    };
+    if h >= ch || cw == 0 || ch == 0 {
+        return SOURCE.into();
+    }
+    let w = ((cw as u64 * h as u64 / ch as u64) as u32 + 1) & !1;
+    format!("width={w}:height={}:resize_mode=scale_aspect:scale_mode=bicubic", h & !1)
 }
 
 const SW_CONVERT: &str = ",hwdownload,format=bgra,scale=out_color_matrix=bt709:out_range=tv,format=nv12";

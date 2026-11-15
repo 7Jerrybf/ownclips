@@ -6,8 +6,9 @@ use serde::Serialize;
 use windows_capture::capture::{CaptureControl, Context, GraphicsCaptureApiHandler};
 use windows_capture::frame::Frame;
 use windows_capture::graphics_capture_api::InternalCaptureControl;
+use windows_capture::monitor::Monitor;
 use windows_capture::settings::{
-    ColorFormat, CursorCaptureSettings, DirtyRegionSettings, DrawBorderSettings,
+    ColorFormat, CursorCaptureSettings, DirtyRegionSettings, DrawBorderSettings, GraphicsCaptureItemType,
     MinimumUpdateIntervalSettings, SecondaryWindowSettings, Settings,
 };
 use windows_capture::window::Window;
@@ -140,6 +141,28 @@ extern "system" {
     fn DwmGetWindowAttribute(hwnd: *mut std::ffi::c_void, attribute: u32, value: *mut u32, size: u32) -> i32;
 }
 
+#[repr(C)]
+#[derive(Default)]
+struct Rect {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+}
+
+#[link(name = "user32")]
+extern "system" {
+    fn GetClientRect(hwnd: *mut std::ffi::c_void, rect: *mut Rect) -> i32;
+}
+
+/// Size of the window's client area (what gets recorded), in pixels.
+pub fn client_size(hwnd: usize) -> Option<(u32, u32)> {
+    let mut r = Rect::default();
+    let ok = unsafe { GetClientRect(hwnd as *mut std::ffi::c_void, &mut r) } != 0;
+    let (w, h) = (r.right - r.left, r.bottom - r.top);
+    (ok && w > 0 && h > 0).then_some((w as u32, h as u32))
+}
+
 const DWMWA_CLOAKED: u32 = 14;
 
 /// Cloaked windows count as visible but aren't shown, like the suspended
@@ -165,14 +188,50 @@ fn recordable(w: &Window) -> Option<WindowInfo> {
     Some(WindowInfo { hwnd: w.as_raw_hwnd() as usize, title, process: w.process_name().unwrap_or_default() })
 }
 
+/// A screen that can be recorded.
+#[derive(Serialize, Clone, Debug)]
+pub struct MonitorInfo {
+    pub hmonitor: usize,
+    /// 1-based, as Windows numbers the displays.
+    pub index: usize,
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// The connected screens.
+pub fn list_monitors() -> Result<Vec<MonitorInfo>> {
+    let monitors = Monitor::enumerate().map_err(|e| anyhow!("列出螢幕失敗: {e}"))?;
+    Ok(monitors.iter().enumerate().map(|(i, m)| monitor_info(m, i + 1)).collect())
+}
+
+fn monitor_info(m: &Monitor, fallback_index: usize) -> MonitorInfo {
+    MonitorInfo {
+        hmonitor: m.as_raw_hmonitor() as usize,
+        index: m.index().unwrap_or(fallback_index),
+        name: m.name().unwrap_or_default(),
+        width: m.width().unwrap_or(0),
+        height: m.height().unwrap_or(0),
+    }
+}
+
+/// The screen with the handle `hmonitor`.
+pub fn monitor(hmonitor: usize) -> MonitorInfo {
+    monitor_info(&Monitor::from_raw_hmonitor(hmonitor as *mut std::ffi::c_void), 1)
+}
+
 /// The window in front, if it can be recorded.
 pub fn foreground_window() -> Option<WindowInfo> {
     Window::foreground().ok().filter(Window::is_valid).as_ref().and_then(recordable)
 }
 
-/// One frame of `window`, or an error if none arrives within `timeout`.
-pub fn grab_frame(window: Window, timeout: Duration) -> Result<FrameData> {
-    let (control, sink) = start_capture(window)?;
+/// One frame of `item` (a window or a screen), or an error if none arrives
+/// within `timeout`.
+pub fn grab_frame<T>(item: T, timeout: Duration) -> Result<FrameData>
+where
+    T: TryInto<GraphicsCaptureItemType> + Send + 'static,
+{
+    let (control, sink) = start_capture_every(item, None, None)?;
     let deadline = Instant::now() + timeout;
     let frame = loop {
         if let Some(f) = sink.lock().unwrap().latest.clone().filter(|f| f.width > 0) {
@@ -190,31 +249,39 @@ pub fn grab_frame(window: Window, timeout: Duration) -> Result<FrameData> {
 /// A small image of the window `hwnd`, at most `width` pixels wide.
 pub fn window_thumbnail(hwnd: usize, width: u32) -> Result<image::RgbImage> {
     let window = Window::from_raw_hwnd(hwnd as *mut std::ffi::c_void);
-    let frame = grab_frame(window, Duration::from_secs(2))?;
+    thumbnail(grab_frame(window, Duration::from_secs(2))?, width)
+}
+
+/// A small image of the screen `hmonitor`, at most `width` pixels wide.
+pub fn monitor_thumbnail(hmonitor: usize, width: u32) -> Result<image::RgbImage> {
+    let monitor = Monitor::from_raw_hmonitor(hmonitor as *mut std::ffi::c_void);
+    thumbnail(grab_frame(monitor, Duration::from_secs(2))?, width)
+}
+
+fn thumbnail(frame: FrameData, width: u32) -> Result<image::RgbImage> {
     let img = frame.to_rgb().ok_or_else(|| anyhow!("擷取畫面資料大小不一致"))?;
     let width = width.min(img.width()).max(1);
     let height = (img.height() as u64 * width as u64 / img.width().max(1) as u64).max(1) as u32;
     Ok(image::imageops::thumbnail(&img, width, height))
 }
 
-/// Starts a background capture of `window` and returns a handle to stop it
-/// plus a shared sink that always holds the most recent frame.
-pub fn start_capture(window: Window) -> Result<(Control, SharedSink)> {
-    start_capture_every(window, None, None)
-}
-
-/// Like [`start_capture`], but delivering at most one frame per `interval`
-/// (every frame is copied to the CPU, so throttle long-running captures)
-/// and, given a `region`, only that part of each frame.
-pub fn start_capture_every(
-    window: Window,
+/// Starts a background capture of `item` (a window or a screen) and returns
+/// a handle to stop it plus a shared sink that always holds the most recent
+/// frame. Delivers at most one frame per `interval` (every frame is copied
+/// to the CPU, so throttle long-running captures) and, given a `region`,
+/// only that part of each frame.
+pub fn start_capture_every<T>(
+    item: T,
     interval: Option<Duration>,
     region: Option<RegionPct>,
-) -> Result<(Control, SharedSink)> {
+) -> Result<(Control, SharedSink)>
+where
+    T: TryInto<GraphicsCaptureItemType> + Send + 'static,
+{
     let sink: SharedSink = Arc::new(Mutex::new(FrameSink::default()));
 
     let settings = Settings::new(
-        window,
+        item,
         CursorCaptureSettings::WithoutCursor,
         DrawBorderSettings::WithoutBorder,
         SecondaryWindowSettings::Default,

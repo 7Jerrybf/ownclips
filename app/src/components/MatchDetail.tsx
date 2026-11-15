@@ -317,7 +317,7 @@ export function MatchDetail({
           </div>
           {ranges.length === 0 ? (
             <div className="empty" style={{ padding: 28 }}>
-              這場沒有擊殺,所以沒有精華區間。
+              無擊殺
             </div>
           ) : (
             <div className="highlight-list">

@@ -38,7 +38,9 @@ const CONTIGUOUS_TOLERANCE: i64 = SAMPLE_RATE as i64 / 50; // 20 ms
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AudioMode {
-    /// Only the game's own audio (per-process loopback).
+    /// Only the game's own audio (per-process loopback). Old configs with
+    /// the removed "off" mode load as this.
+    #[serde(alias = "off")]
     Game,
     /// Everything the speakers/headphones play.
     System,
@@ -46,15 +48,53 @@ pub enum AudioMode {
     GameAndMic,
     /// Everything the speakers/headphones play plus the default microphone.
     SystemAndMic,
-    /// No audio track.
-    Off,
 }
 
-#[derive(Clone, Copy)]
+/// Which microphone to record and how loud each source is mixed.
+#[derive(Clone, Debug)]
+pub struct AudioOptions {
+    /// Device id from [`list_microphones`]; None (or a device that is gone)
+    /// uses Windows' default microphone.
+    pub mic_device: Option<String>,
+    /// Gain of the game / system audio (1.0 = unchanged).
+    pub volume: f32,
+    /// Gain of the microphone.
+    pub mic_volume: f32,
+}
+
+impl Default for AudioOptions {
+    fn default() -> Self {
+        Self { mic_device: None, volume: 1.0, mic_volume: 1.0 }
+    }
+}
+
+/// A microphone that can be picked in the settings.
+#[derive(Serialize, Clone, Debug)]
+pub struct AudioDevice {
+    pub id: String,
+    pub name: String,
+}
+
+/// The connected microphones.
+pub fn list_microphones() -> Result<Vec<AudioDevice>> {
+    // Fails harmlessly if this thread already uses COM in another mode.
+    let _ = wasapi::initialize_mta();
+    let devices = DeviceEnumerator::new()?.get_device_collection(&Direction::Capture)?;
+    let mut out = Vec::new();
+    for i in 0..devices.get_nbr_devices()? {
+        let d = devices.get_device_at_index(i)?;
+        if let (Ok(id), Ok(name)) = (d.get_id(), d.get_friendlyname()) {
+            out.push(AudioDevice { id, name });
+        }
+    }
+    Ok(out)
+}
+
+#[derive(Clone)]
 enum Source {
     Process(u32),
     SystemLoopback,
-    Microphone,
+    Microphone(Option<String>),
 }
 
 /// One source's not-yet-written samples, starting at absolute frame `start`
@@ -93,20 +133,28 @@ pub struct AudioRecorder {
 
 impl AudioRecorder {
     /// Starts recording `mode` into `out` (raw s16le), with sample 0 at
-    /// performance-counter time `start`.
-    pub fn start(mode: AudioMode, game_pid: u32, start: u64, out: &Path) -> Result<Option<Self>> {
-        let sources = match mode {
-            AudioMode::Off => return Ok(None),
-            AudioMode::Game => vec![Source::Process(game_pid)],
-            AudioMode::System => vec![Source::SystemLoopback],
-            AudioMode::GameAndMic => vec![Source::Process(game_pid), Source::Microphone],
-            AudioMode::SystemAndMic => vec![Source::SystemLoopback, Source::Microphone],
+    /// performance-counter time `start`. Without a `game_pid` (a whole
+    /// screen is being recorded) the game modes record the system audio.
+    pub fn start(
+        mode: AudioMode,
+        options: &AudioOptions,
+        game_pid: Option<u32>,
+        start: u64,
+        out: &Path,
+    ) -> Result<Option<Self>> {
+        let main = match (mode, game_pid) {
+            (AudioMode::Game | AudioMode::GameAndMic, Some(pid)) => Source::Process(pid),
+            _ => Source::SystemLoopback,
         };
+        let mut sources = vec![(main, options.volume)];
+        if matches!(mode, AudioMode::GameAndMic | AudioMode::SystemAndMic) {
+            sources.push((Source::Microphone(options.mic_device.clone()), options.mic_volume));
+        }
 
         let stop = Arc::new(AtomicBool::new(false));
         let mut threads = Vec::new();
         let mut pendings = Vec::new();
-        for source in sources {
+        for (source, gain) in sources {
             let pending: Arc<Mutex<Pending>> = Arc::default();
             let (ready_tx, ready_rx) = std::sync::mpsc::channel();
             let (stop2, pending2) = (stop.clone(), pending.clone());
@@ -117,7 +165,7 @@ impl AudioRecorder {
             }));
             // Surface setup errors (no microphone, bad pid...) right away.
             match ready_rx.recv_timeout(Duration::from_secs(5)) {
-                Ok(Ok(())) => pendings.push(pending),
+                Ok(Ok(())) => pendings.push((pending, gain)),
                 Ok(Err(e)) => {
                     stop.store(true, Ordering::Relaxed);
                     return Err(anyhow!("啟動聲音擷取失敗: {e}"));
@@ -167,7 +215,14 @@ fn capture_source(
     let mut client = match source {
         Source::Process(pid) => AudioClient::new_application_loopback_client(pid, true)?,
         Source::SystemLoopback => DeviceEnumerator::new()?.get_default_device(&Direction::Render)?.get_iaudioclient()?,
-        Source::Microphone => DeviceEnumerator::new()?.get_default_device(&Direction::Capture)?.get_iaudioclient()?,
+        Source::Microphone(id) => {
+            let devices = DeviceEnumerator::new()?;
+            // An unplugged microphone falls back to the default one.
+            match id.and_then(|id| devices.get_device(&id).ok()) {
+                Some(d) => d.get_iaudioclient()?,
+                None => devices.get_default_device(&Direction::Capture)?.get_iaudioclient()?,
+            }
+        }
     };
     // Capturing from a render device is a loopback capture.
     client.initialize_client(&format, &Direction::Capture, &mode)?;
@@ -211,7 +266,7 @@ fn capture_source(
     Ok(())
 }
 
-fn write_loop(pendings: Vec<Arc<Mutex<Pending>>>, start: u64, mut out: BufWriter<File>, stop: &AtomicBool) -> Result<()> {
+fn write_loop(pendings: Vec<(Arc<Mutex<Pending>>, f32)>, start: u64, mut out: BufWriter<File>, stop: &AtomicBool) -> Result<()> {
     let mut written: i64 = 0;
     let mut mix: Vec<f32> = Vec::new();
     let mut pcm: Vec<u8> = Vec::new();
@@ -227,7 +282,7 @@ fn write_loop(pendings: Vec<Arc<Mutex<Pending>>>, start: u64, mut out: BufWriter
             let n = (target - written) as usize;
             mix.clear();
             mix.resize(n * CHANNELS, 0.0);
-            for p in &pendings {
+            for (p, gain) in &pendings {
                 let mut p = p.lock().unwrap();
                 // Drop anything that arrived too late to be placed.
                 if p.start < written {
@@ -239,7 +294,7 @@ fn write_loop(pendings: Vec<Arc<Mutex<Pending>>>, start: u64, mut out: BufWriter
                 if offset < n {
                     let take = ((n - offset) * CHANNELS).min(p.samples.len());
                     for (m, s) in mix[offset * CHANNELS..].iter_mut().zip(p.samples.drain(..take)) {
-                        *m += s;
+                        *m += s * gain;
                     }
                     p.start += (take / CHANNELS) as i64;
                 }

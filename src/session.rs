@@ -29,7 +29,7 @@ use crate::config;
 use crate::gamestate::{self, Game, GameEvent, LogWatcher};
 use crate::killfeed::{self, RowCounter};
 use crate::league::LeagueWatcher;
-use crate::recorder::{self, Recorder};
+use crate::recorder::{self, Recorder, Target};
 use crate::storage;
 
 /// Keep recording this long after the match is decided (final kill, the
@@ -38,7 +38,7 @@ const END_TAIL: Duration = Duration::from_secs(6);
 /// Shorter recordings without any event are discarded as false starts.
 const MIN_MATCH_SECONDS: f64 = 20.0;
 /// The `mode` of recordings made by hand.
-const MANUAL_MODE: &str = "手動錄影";
+const MANUAL_MODE: &str = "錄影";
 /// Window titles (a manual recording's `map`) are cut to this many characters.
 const MAX_TITLE_CHARS: usize = 40;
 
@@ -178,7 +178,7 @@ impl AutoRecorder {
                         continue;
                     }
                     let started = capture::find_game_window(game)
-                        .and_then(|window| self.start_match(game, window, map.clone(), mode.clone()));
+                        .and_then(|w| self.start_match(game, Target::Window(w.as_raw_hwnd() as usize), map.clone(), mode.clone()));
                     match started {
                         Ok(video) => notices.push(Notice::Started { video, map, mode, manual: false }),
                         Err(e) => notices.push(Notice::Error(format!("開始錄影失敗: {e:#}"))),
@@ -212,16 +212,21 @@ impl AutoRecorder {
         notices
     }
 
-    /// Starts recording the window `hwnd` by hand; only `stop_manual` (or the
-    /// window closing) ends it. Refused while a match is being recorded.
-    pub fn start_manual(&mut self, hwnd: usize) -> Vec<Notice> {
+    /// Starts recording a window or a screen by hand; only `stop_manual` (or
+    /// the window closing) ends it. Refused while a match is being recorded.
+    pub fn start_manual(&mut self, target: Target) -> Vec<Notice> {
         if self.current.is_some() {
             return vec![Notice::Error("已經在錄影中,先結束目前的錄影".to_string())];
         }
-        let window = Window::from_raw_hwnd(hwnd as *mut std::ffi::c_void);
-        let map: String = window.title().unwrap_or_default().chars().take(MAX_TITLE_CHARS).collect();
+        let map: String = match target {
+            Target::Window(hwnd) => {
+                let window = Window::from_raw_hwnd(hwnd as *mut std::ffi::c_void);
+                window.title().unwrap_or_default().chars().take(MAX_TITLE_CHARS).collect()
+            }
+            Target::Monitor(hmonitor) => format!("螢幕 {}", capture::monitor(hmonitor).index),
+        };
         let mode = MANUAL_MODE.to_string();
-        match self.start_match(Game::Other, window, map.clone(), mode.clone()) {
+        match self.start_match(Game::Other, target, map.clone(), mode.clone()) {
             Ok(video) => vec![Notice::Started { video, map, mode, manual: true }],
             Err(e) => vec![Notice::Error(format!("開始錄影失敗: {e:#}"))],
         }
@@ -236,7 +241,7 @@ impl AutoRecorder {
         }
     }
 
-    fn start_match(&mut self, game: Game, window: Window, map: String, mode: String) -> Result<PathBuf> {
+    fn start_match(&mut self, game: Game, target: Target, map: String, mode: String) -> Result<PathBuf> {
         let cfg = config::load()?;
         let dir = cfg.recordings_dir()?;
         fs::create_dir_all(&dir)?;
@@ -247,7 +252,7 @@ impl AutoRecorder {
             // The game reports the events; there is no killfeed to watch.
             settings.detect_region = None;
         }
-        let recorder = Recorder::start(window, &video, settings)?;
+        let recorder = Recorder::start(target, &video, settings)?;
         let info = MatchInfo {
             game,
             map,

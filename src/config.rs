@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::audio::AudioMode;
+use crate::audio::{AudioMode, AudioOptions};
 use crate::recorder::{RecordSettings, VideoCodec, VideoQuality};
 
 /// A screen region expressed as fractions (0.0..1.0) of the captured
@@ -30,11 +30,18 @@ pub struct Config {
     pub clip_post_seconds: f64,
     /// Built-in recorder settings.
     pub audio_mode: AudioMode,
+    /// Microphone device id; None is Windows' default microphone.
+    pub mic_device: Option<String>,
+    /// Loudness of the game / system audio and of the microphone, in percent.
+    pub audio_volume: u32,
+    pub mic_volume: u32,
     pub video_fps: u32,
     pub video_codec: VideoCodec,
     pub video_quality: VideoQuality,
     /// H.264 only; AV1 uses `video_quality`.
     pub video_bitrate_mbps: u32,
+    /// Output height (e.g. 1080); None records at the game's own size.
+    pub video_height: Option<u32>,
     /// Closing the window hides it to the tray and keeps recording.
     pub close_to_tray: bool,
     /// Size limit of the recordings folder in GB; None keeps everything.
@@ -55,10 +62,14 @@ impl Default for Config {
             clip_pre_seconds: 8.0,
             clip_post_seconds: 3.0,
             audio_mode: AudioMode::Game,
+            mic_device: None,
+            audio_volume: 100,
+            mic_volume: 100,
             video_fps: 60,
             video_codec: VideoCodec::Av1,
             video_quality: VideoQuality::Standard,
             video_bitrate_mbps: 20,
+            video_height: None,
             close_to_tray: true,
             storage_limit_gb: None,
             manual_hotkey: Some("Ctrl+Alt+F9".to_string()),
@@ -89,7 +100,13 @@ impl Config {
             bitrate_mbps: self.video_bitrate_mbps,
             codec: self.video_codec,
             quality: self.video_quality,
+            height: self.video_height,
             audio: self.audio_mode,
+            audio_options: AudioOptions {
+                mic_device: self.mic_device.clone(),
+                volume: self.audio_volume as f32 / 100.0,
+                mic_volume: self.mic_volume as f32 / 100.0,
+            },
             detect_region: self.killfeed_region.map(detect_region),
         }
     }

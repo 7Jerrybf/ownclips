@@ -1,7 +1,7 @@
 // Settings, saved automatically as they change.
 import { open } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { AudioMode, Config, StorageUsage, VideoCodec, VideoQuality } from "../api";
+import type { AudioDevice, AudioMode, Config, StorageUsage, VideoCodec, VideoQuality } from "../api";
 import { api } from "../api";
 import { Calibration } from "./Calibration";
 import { HotkeyField } from "./HotkeyField";
@@ -9,9 +9,9 @@ import { size } from "../format";
 import { IconFolder } from "./Icons";
 import type { Updates } from "./Update";
 
-const CODECS: { codec: VideoCodec; label: string; desc: string }[] = [
-  { codec: "av1", label: "AV1", desc: "檔案大約只有 H.264 的一半,畫質幾乎一樣(建議)" },
-  { codec: "h264", label: "H.264", desc: "所有裝置和播放器都能播,檔案較大" },
+const CODECS: { codec: VideoCodec; label: string; hint: string }[] = [
+  { codec: "av1", label: "AV1", hint: "檔案約 H.264 一半(建議)" },
+  { codec: "h264", label: "H.264", hint: "相容性最好" },
 ];
 
 const QUALITIES: { quality: VideoQuality; label: string }[] = [
@@ -20,13 +20,34 @@ const QUALITIES: { quality: VideoQuality; label: string }[] = [
   { quality: "small", label: "省空間" },
 ];
 
-const AUDIO: { mode: AudioMode; title: string; desc: string }[] = [
-  { mode: "game", title: "只錄遊戲聲音", desc: "只抓遊戲本身的聲音,Discord、音樂不會錄進去(建議)" },
-  { mode: "game_and_mic", title: "遊戲聲音 + 麥克風", desc: "遊戲聲音之外,也錄你的麥克風" },
-  { mode: "system", title: "系統所有聲音", desc: "喇叭 / 耳機聽到的全部,包含語音和音樂" },
-  { mode: "system_and_mic", title: "系統所有聲音 + 麥克風", desc: "喇叭 / 耳機聽到的全部,再加上你的麥克風" },
-  { mode: "off", title: "不錄聲音", desc: "只錄畫面" },
+/** null = the game window's own size. */
+const RESOLUTIONS: { height: number | null; label: string }[] = [
+  { height: null, label: "原始" },
+  { height: 1440, label: "1440p" },
+  { height: 1080, label: "1080p" },
+  { height: 720, label: "720p" },
 ];
+
+// The backend has one combined mode; the UI splits it into "what you hear"
+// plus a separate microphone switch so the mic can't be missed.
+type AudioSource = "game" | "system";
+const AUDIO: { source: AudioSource; label: string; hint: string }[] = [
+  { source: "game", label: "遊戲", hint: "只錄遊戲 / 該視窗的聲音(錄螢幕時為系統聲音)" },
+  { source: "system", label: "系統", hint: "電腦所有聲音,含語音、音樂" },
+];
+
+function audioSource(mode: AudioMode): AudioSource {
+  return mode === "game_and_mic" ? "game" : mode === "system_and_mic" ? "system" : mode;
+}
+
+function hasMic(mode: AudioMode): boolean {
+  return mode === "game_and_mic" || mode === "system_and_mic";
+}
+
+function audioMode(source: AudioSource, mic: boolean): AudioMode {
+  if (!mic) return source;
+  return source === "game" ? "game_and_mic" : "system_and_mic";
+}
 
 export function SettingsView({
   notify,
@@ -46,6 +67,7 @@ export function SettingsView({
   const [usage, setUsage] = useState<StorageUsage | null>(null);
   const [confirmClean, setConfirmClean] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [mics, setMics] = useState<AudioDevice[]>([]);
   const first = useRef(true);
 
   useEffect(() => {
@@ -54,6 +76,10 @@ export function SettingsView({
       .then(setCfg)
       .catch((e) => notify(String(e), "error"));
     api.ffmpegAvailable().then(setFfmpeg);
+    api
+      .listMicrophones()
+      .then(setMics)
+      .catch(() => {});
     api
       .getAutostart()
       .then(setAutostart)
@@ -129,7 +155,7 @@ export function SettingsView({
     try {
       await api.saveConfig(cfg); // the cleanup reads the saved limit
       const n = await api.cleanStorage();
-      notify(`已刪除最舊的 ${n} 場錄影`, "success");
+      notify(`已清理 ${n} 場`, "success");
     } catch (e) {
       notify(String(e), "error");
     }
@@ -142,100 +168,156 @@ export function SettingsView({
     if (typeof picked === "string") set("recordings_dir", picked);
   }
 
+  const seg = <T,>(items: { v: T; label: string; title?: string }[], value: T, onPick: (v: T) => void) => (
+    <div className="segmented">
+      {items.map((i) => (
+        <button key={i.label} title={i.title} className={value === i.v ? "on" : ""} onClick={() => onPick(i.v)}>
+          {i.label}
+        </button>
+      ))}
+    </div>
+  );
+
+  const volume = (key: "audio_volume" | "mic_volume") => (
+    <div className="range-wrap">
+      <input
+        type="range"
+        min={0}
+        max={200}
+        step={5}
+        value={cfg[key]}
+        onChange={(e) => set(key, Number(e.target.value))}
+      />
+      <span className="val num">{cfg[key]}%</span>
+    </div>
+  );
+
   return (
     <div className="page">
       <div className="page-head">
         <div>
           <h1 className="page-title">設定</h1>
-          <div className="page-sub">
-            變更會自動儲存{saved && <span style={{ color: "var(--kill)" }}> · 已儲存</span>}
-          </div>
+          <div className="page-sub">{saved ? <span style={{ color: "var(--kill)" }}>✓ 已儲存</span> : "自動儲存"}</div>
         </div>
       </div>
 
       <div className="settings">
         <div className="section-title">錄影</div>
         <div className="section">
-          <div className="audio-options">
-            {AUDIO.map((a) => (
-              <button
-                key={a.mode}
-                className={`audio-option ${cfg.audio_mode === a.mode ? "on" : ""}`}
-                onClick={() => set("audio_mode", a.mode)}
-              >
-                <b>{a.title}</b>
-                <span>{a.desc}</span>
-              </button>
-            ))}
+          <div className="field">
+            <div className="field-label">
+              <b>聲音</b>
+              <span>{AUDIO.find((a) => a.source === audioSource(cfg.audio_mode))?.hint}</span>
+            </div>
+            {seg(
+              AUDIO.map((a) => ({ v: a.source, label: a.label, title: a.hint })),
+              audioSource(cfg.audio_mode),
+              (src) => set("audio_mode", audioMode(src, hasMic(cfg.audio_mode))),
+            )}
           </div>
           <div className="field">
             <div className="field-label">
-              <b>影片格式</b>
-              <span>{CODECS.find((c) => c.codec === cfg.video_codec)?.desc}</span>
+              <b>音量</b>
             </div>
-            <div className="segmented">
-              {CODECS.map((c) => (
-                <button
-                  key={c.codec}
-                  className={cfg.video_codec === c.codec ? "on" : ""}
-                  onClick={() => set("video_codec", c.codec)}
+            {volume("audio_volume")}
+          </div>
+          <div className="field">
+            <div className="field-label">
+              <b>麥克風</b>
+            </div>
+            <div className="field-control">
+              {hasMic(cfg.audio_mode) && (
+                <select
+                  className="select"
+                  value={cfg.mic_device ?? ""}
+                  onChange={(e) => set("mic_device", e.target.value || null)}
                 >
-                  {c.label}
-                </button>
-              ))}
+                  <option value="">系統預設</option>
+                  {mics.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.name}
+                    </option>
+                  ))}
+                  {cfg.mic_device && !mics.some((m) => m.id === cfg.mic_device) && (
+                    <option value={cfg.mic_device}>未連接(改用預設)</option>
+                  )}
+                </select>
+              )}
+              <button
+                className={`switch ${hasMic(cfg.audio_mode) ? "on" : ""}`}
+                aria-pressed={hasMic(cfg.audio_mode)}
+                onClick={() =>
+                  set("audio_mode", audioMode(audioSource(cfg.audio_mode), !hasMic(cfg.audio_mode)))
+                }
+              />
             </div>
+          </div>
+          {hasMic(cfg.audio_mode) && (
+            <div className="field">
+              <div className="field-label">
+                <b>麥克風音量</b>
+              </div>
+              {volume("mic_volume")}
+            </div>
+          )}
+          <div className="field">
+            <div className="field-label">
+              <b>格式</b>
+              {fallback ? (
+                <span className="warn">顯示卡不支援 AV1,改用 H.264</span>
+              ) : (
+                <span>{CODECS.find((c) => c.codec === cfg.video_codec)?.hint}</span>
+              )}
+            </div>
+            <span
+              className="chip"
+              title={encoder?.endsWith("_nvenc") ? "NVIDIA 硬體編碼" : encoder ? "編碼器" : "偵測中(需要 ffmpeg)"}
+            >
+              {encoder ?? "…"}
+            </span>
+            {seg(
+              CODECS.map((c) => ({ v: c.codec, label: c.label, title: c.hint })),
+              cfg.video_codec,
+              (c) => set("video_codec", c),
+            )}
           </div>
           <div className="field">
             <div className="field-label">
-              <b>影片編碼器</b>
-              <span>
-                {fallback
-                  ? "這張顯示卡不支援 AV1 硬體編碼,會改用 H.264 錄影"
-                  : encoder?.endsWith("_nvenc")
-                    ? "NVIDIA 顯示卡硬體編碼,幾乎不影響遊戲效能"
-                    : encoder
-                      ? "自動選擇的編碼器"
-                      : "偵測中…(需要 ffmpeg)"}
-              </span>
+              <b>解析度</b>
+              <span>高於遊戲解析度時錄原始</span>
             </div>
-            <span className="chip">{encoder ?? "—"}</span>
+            {seg(
+              RESOLUTIONS.map((r) => ({ v: r.height, label: r.label })),
+              cfg.video_height ?? null,
+              (h) => set("video_height", h),
+            )}
           </div>
           <div className="field">
             <div className="field-label">
-              <b>畫面更新率</b>
-              <span>60 FPS 畫面較順,30 FPS 檔案較小</span>
+              <b>FPS</b>
             </div>
-            <div className="segmented">
-              {[30, 60].map((f) => (
-                <button key={f} className={cfg.video_fps === f ? "on" : ""} onClick={() => set("video_fps", f)}>
-                  {f} FPS
-                </button>
-              ))}
-            </div>
+            {seg(
+              [30, 60].map((f) => ({ v: f, label: String(f) })),
+              cfg.video_fps,
+              (f) => set("video_fps", f),
+            )}
           </div>
           {av1 ? (
             <div className="field">
               <div className="field-label">
                 <b>畫質</b>
-                <span>標準:清晰度和 H.264 20 Mbps 差不多。省空間:檔案再小約三成,細節稍微少一點</span>
               </div>
-              <div className="segmented">
-                {QUALITIES.map((q) => (
-                  <button
-                    key={q.quality}
-                    className={cfg.video_quality === q.quality ? "on" : ""}
-                    onClick={() => set("video_quality", q.quality)}
-                  >
-                    {q.label}
-                  </button>
-                ))}
-              </div>
+              {seg(
+                QUALITIES.map((q) => ({ v: q.quality, label: q.label })),
+                cfg.video_quality,
+                (q) => set("video_quality", q),
+              )}
             </div>
           ) : (
             <div className="field">
               <div className="field-label">
-                <b>畫質(位元率)</b>
-                <span>越高越清楚,檔案也越大。1440p 建議 20 Mbps 以上</span>
+                <b>位元率</b>
+                <span>1440p 建議 ≥ 20 Mbps</span>
               </div>
               <div className="range-wrap">
                 <input
@@ -252,8 +334,7 @@ export function SettingsView({
           )}
           <div className="field">
             <div className="field-label">
-              <b>錄影位置</b>
-              <span>整場錄影存在這裡;手動匯出的片段在底下的 clips 資料夾</span>
+              <b>位置</b>
             </div>
             <div className="field-control">
               <span className="path-box" title={dir}>
@@ -274,11 +355,9 @@ export function SettingsView({
           <div className="field">
             <div className="field-label">
               <b>容量上限</b>
-              <span>
-                {usage ? `目前錄影共 ${size(usage.used)}` : "計算中…"}
-                {cfg.storage_limit_gb === null
-                  ? "。開啟後,超過上限會自動刪除最舊的錄影"
-                  : `,超過 ${cfg.storage_limit_gb} GB 時自動刪除最舊的錄影(已保留的對局和匯出的片段不會刪)`}
+              <span title="超過時自動刪除最舊錄影(已保留與片段除外)">
+                {usage ? `已用 ${size(usage.used)}` : "…"}
+                {cfg.storage_limit_gb !== null && " · 超過自動刪最舊"}
               </span>
             </div>
             <div className="field-control">
@@ -307,14 +386,13 @@ export function SettingsView({
               <div className="field-label">
                 <b className="warn">超過上限</b>
                 <span>
-                  下一場對局存好後(或下次開啟 OwnClips 時)會永久刪除最舊的 {usage.delete_count} 場錄影,釋放{" "}
-                  {size(usage.delete_bytes)}。想留下的對局請先按「保留」。
+                  將刪除最舊 {usage.delete_count} 場 · {size(usage.delete_bytes)}
                 </span>
               </div>
               {confirmClean ? (
                 <div className="field-control">
                   <button className="btn danger" onClick={cleanNow}>
-                    確定刪除 {usage.delete_count} 場
+                    刪除 {usage.delete_count} 場
                   </button>
                   <button className="btn ghost" onClick={() => setConfirmClean(false)}>
                     取消
@@ -329,7 +407,7 @@ export function SettingsView({
           )}
         </div>
 
-        <div className="section-title">手動錄影</div>
+        <div className="section-title">錄影快捷鍵</div>
         <div className="section">
           <HotkeyField
             value={cfg.manual_hotkey}
@@ -346,8 +424,8 @@ export function SettingsView({
         <div className="section">
           <div className="field">
             <div className="field-label">
-              <b>關閉視窗時縮到系統匣</b>
-              <span>按 ✕ 後 OwnClips 繼續在右下角背景偵測、錄影;要完全結束請在系統匣圖示按右鍵</span>
+              <b>關閉時縮到系統匣</b>
+              <span>右鍵系統匣圖示可完全結束</span>
             </div>
             <button
               className={`switch ${cfg.close_to_tray ? "on" : ""}`}
@@ -357,8 +435,7 @@ export function SettingsView({
           </div>
           <div className="field">
             <div className="field-label">
-              <b>開機時自動啟動</b>
-              <span>登入 Windows 後直接在背景待命,不會跳出視窗,開打就自動錄</span>
+              <b>開機自動啟動</b>
             </div>
             <button
               className={`switch ${autostart ? "on" : ""}`}
@@ -373,8 +450,7 @@ export function SettingsView({
         <div className="section">
           <div className="field">
             <div className="field-label">
-              <b>擊殺前保留</b>
-              <span>精華區間從第一次擊殺前幾秒開始;相近的擊殺會合併成多殺</span>
+              <b>擊殺前</b>
             </div>
             <div className="range-wrap">
               <input
@@ -390,8 +466,7 @@ export function SettingsView({
           </div>
           <div className="field">
             <div className="field-label">
-              <b>擊殺後保留</b>
-              <span>最後一次擊殺後再多錄幾秒</span>
+              <b>擊殺後</b>
             </div>
             <div className="range-wrap">
               <input
@@ -409,7 +484,7 @@ export function SettingsView({
             <div className="field">
               <div className="field-label">
                 <b className="warn">找不到 ffmpeg</b>
-                <span>錄影需要 ffmpeg。請在終端機執行 winget install Gyan.FFmpeg 後重新開啟 OwnClips。</span>
+                <span>winget install Gyan.FFmpeg</span>
               </div>
             </div>
           )}
@@ -432,11 +507,7 @@ export function SettingsView({
           <div className="field">
             <div className="field-label">
               <b>OwnClips {updates.current}</b>
-              <span>
-                {updates.available
-                  ? `有新版本 ${updates.available.version},可以在左下角更新`
-                  : "啟動時和每隔幾小時會自動檢查新版本"}
-              </span>
+              {updates.available && <span>新版本 {updates.available.version}</span>}
             </div>
             <button
               className="btn sm"

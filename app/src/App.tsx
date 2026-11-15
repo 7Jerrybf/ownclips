@@ -4,13 +4,13 @@ import type { ClipSummary, MatchSummary, RecorderStatus, Toast } from "./api";
 import { api } from "./api";
 import { ClipDetail } from "./components/ClipDetail";
 import { HighlightsView } from "./components/HighlightsView";
-import { IconClips, IconMatches, IconPlay, IconSettings } from "./components/Icons";
+import { IconAssist, IconClips, IconDeath, IconKill, IconMatches, IconPlay, IconSettings } from "./components/Icons";
 import { MatchDetail } from "./components/MatchDetail";
 import { MatchesView } from "./components/MatchesView";
 import { SettingsView } from "./components/SettingsView";
 import { Toasts, type ToastItem } from "./components/Toasts";
 import { UpdateCard, useUpdates } from "./components/Update";
-import { WindowPicker } from "./components/WindowPicker";
+import { SourcePicker } from "./components/SourcePicker";
 import { clock, hotkeyLabel } from "./format";
 
 type Page = "matches" | "highlights" | "settings";
@@ -145,12 +145,12 @@ export default function App() {
         {!open && page === "settings" && <SettingsView notify={notify} onSaved={refresh} updates={updates} />}
       </main>
       {picking && (
-        <WindowPicker
+        <SourcePicker
           notify={notify}
           onClose={() => setPicking(false)}
-          onPick={(w) => {
+          onPick={(target) => {
             setPicking(false);
-            api.startManual(w.hwnd).catch((e) => notify(String(e), "error"));
+            api.startManual(target).catch((e) => notify(String(e), "error"));
           }}
         />
       )}
@@ -184,31 +184,30 @@ function StatusCard({
   const [stopping, setStopping] = useState(false);
   useEffect(() => setStopping(false), [status?.video]);
 
-  if (status?.state === "recording") {
-    const elapsed = status.started_at ? (Date.now() - status.started_at) / 1000 : 0;
-    if (status.manual) {
-      return (
-        <div className="status-card recording">
-          <div className="status-head">
-            <span className="dot live" /> 手動錄影中 <span className="num" style={{ marginLeft: "auto" }}>{clock(elapsed)}</span>
-          </div>
-          <div className="status-sub">{status.map}</div>
-          <button
-            className="btn sm danger"
-            disabled={stopping}
-            onClick={() => {
-              setStopping(true);
-              api.stopManual().catch((e) => {
-                setStopping(false);
-                notify(String(e), "error");
-              });
-            }}
-          >
-            {stopping ? "停止中…" : hotkey ? `停止錄影 (${hotkeyLabel(hotkey)})` : "停止錄影"}
-          </button>
-        </div>
-      );
-    }
+  const recording = status?.state === "recording";
+  const elapsed = recording && status.started_at ? (Date.now() - status.started_at) / 1000 : 0;
+  const keys = hotkey ? hotkeyLabel(hotkey) : null;
+
+  function stop() {
+    setStopping(true);
+    api.stopManual().catch((e) => {
+      setStopping(false);
+      notify(String(e), "error");
+    });
+  }
+
+  if (recording && status.manual) {
+    return (
+      <div className="status-card recording">
+        <button className="rec-btn on" disabled={stopping} title={keys ? `停止 (${keys})` : "停止"} onClick={stop}>
+          <span className="rec-dot stop" />
+          <span className="num">{clock(elapsed)}</span>
+        </button>
+        <div className="status-sub">{status.map}</div>
+      </div>
+    );
+  }
+  if (recording) {
     return (
       <div className="status-card recording">
         <div className="status-head">
@@ -218,34 +217,39 @@ function StatusCard({
           {status.mode} · {status.map}
         </div>
         <div className="status-kd num">
-          <span style={{ color: "var(--kill)" }}>{status.kills} 擊殺</span>
-          <span style={{ color: "var(--death)" }}>{status.deaths} 死亡</span>
-          <span style={{ color: "var(--assist)" }}>{status.assists} 助攻</span>
+          <span style={{ color: "var(--kill)" }} title="擊殺">
+            <IconKill size={13} /> {status.kills}
+          </span>
+          <span style={{ color: "var(--death)" }} title="死亡">
+            <IconDeath size={13} /> {status.deaths}
+          </span>
+          <span style={{ color: "var(--assist)" }} title="助攻">
+            <IconAssist size={13} /> {status.assists}
+          </span>
         </div>
       </div>
     );
   }
   return (
     <div className="status-card">
-      <div className="status-head">
-        <span className={`dot ${calibrated ? "ok" : ""}`} /> {calibrated ? "待命中" : "需要設定"}
-      </div>
-      <div className="status-sub">
-        {calibrated ? "Valorant / 英雄聯盟對局開始時會自動錄影" : "還沒校準 killfeed,Valorant 錄影時不會偵測擊殺"}
-      </div>
-      {!calibrated && (
-        <button className="btn sm" onClick={onFix}>
-          前往校準
-        </button>
-      )}
       <button
-        className="btn sm"
+        className="rec-btn"
         disabled={!status}
         onClick={onRecord}
-        title={hotkey ? `在任何視窗按 ${hotkeyLabel(hotkey)} 可以直接錄那個視窗` : undefined}
+        title={keys ? `選擇螢幕或視窗 · ${keys} 直接錄目前視窗` : "選擇螢幕或視窗"}
       >
-        手動錄影{hotkey && ` (${hotkeyLabel(hotkey)})`}
+        <span className="rec-dot" />
+        錄影
+        {keys && <kbd>{keys}</kbd>}
       </button>
+      <div className="status-head">
+        <span className={`dot ${calibrated ? "ok" : ""}`} /> {calibrated ? "自動錄影待命" : "Killfeed 未校準"}
+        {!calibrated && (
+          <button className="btn sm" style={{ marginLeft: "auto" }} onClick={onFix}>
+            校準
+          </button>
+        )}
+      </div>
     </div>
   );
 }
