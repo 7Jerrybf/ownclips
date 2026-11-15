@@ -71,13 +71,13 @@ export function ClipDetail({
           </h1>
           <div className="page-sub num">
             {shortDate(stampOf(clip.modified_ms))} 匯出
-            {at !== null && ` · 對局 ${clock(at)} 起`} · {clock(duration)} · {size(clip.size)}
+            {at !== null && ` · 錄影 ${clock(at)} 起`} · {clock(duration)} · {size(clip.size)}
           </div>
         </div>
         <div className="page-actions">
           {onOpenMatch && at !== null && (
-            <button className="btn" onClick={() => onOpenMatch([at, at + duration])} title="打開這個片段來源的整場對局">
-              <IconMatches size={16} /> 原始對局
+            <button className="btn" onClick={() => onOpenMatch([at, at + duration])} title="打開這個片段來源的整段錄影">
+              <IconMatches size={16} /> 原始錄影
             </button>
           )}
           <button className="btn" onClick={() => api.reveal(clip.path)}>

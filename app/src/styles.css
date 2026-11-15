@@ -546,6 +546,9 @@ button {
   gap: 20px;
   align-items: start;
 }
+.viewer.solo {
+  grid-template-columns: 1fr;
+}
 .player-wrap {
   position: relative;
   background: black;

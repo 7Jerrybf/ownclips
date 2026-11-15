@@ -5,7 +5,7 @@ import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { EventKind, MatchSummary } from "../api";
 import { api, fileUrl } from "../api";
-import { clock, count, gameLabel, kindLabel, shortDate } from "../format";
+import { clock, count, gameLabel, hasKda, kindLabel, shortDate } from "../format";
 import { type Highlight, highlights, killLabel } from "../highlights";
 import {
   IconAssist,
@@ -79,6 +79,7 @@ export function MatchDetail({
   /** Range being played; playback pauses at its end. */
   const playingRange = useRef<[number, number] | null>(initialRange ?? null);
 
+  const kda = hasKda(match.info.game);
   const events = useMemo(() => [...match.info.events].sort((a, b) => a.t - b.t), [match]);
   const ranges = useMemo(() => highlights(match, pre, post), [match, pre, post]);
 
@@ -187,9 +188,9 @@ export function MatchDetail({
             className={`btn ${match.info.keep ? "keep-on" : ""}`}
             disabled={match.recording}
             onClick={() => api.setKeep(match.video, !match.info.keep).catch((e) => notify(String(e), "error"))}
-            title="保留的對局超過容量上限時不會被自動刪除"
+            title="保留的錄影超過容量上限時不會被自動刪除"
           >
-            <IconKeep size={16} filled={match.info.keep} /> {match.info.keep ? "已保留" : "保留這場"}
+            <IconKeep size={16} filled={match.info.keep} /> {match.info.keep ? "已保留" : "保留"}
           </button>
           {match.info.game === "valorant" && (
             <button
@@ -204,7 +205,7 @@ export function MatchDetail({
         </div>
       </div>
 
-      <div className="viewer">
+      <div className={`viewer ${kda ? "" : "solo"}`}>
         <div>
           <Player
             videoRef={video}
@@ -283,6 +284,7 @@ export function MatchDetail({
           />
 
           <div className="player-hint">
+            {kda ? (
             <div className="legend">
               <span>
                 <i style={{ background: "var(--kill)" }} />
@@ -301,21 +303,26 @@ export function MatchDetail({
                 精華
               </span>
             </div>
+            ) : (
+              <div />
+            )}
             <span>
               <span className="kbd">Space</span>播放 <span className="kbd">←</span>
-              <span className="kbd">→</span>5 秒 <span className="kbd">,</span>
-              <span className="kbd">.</span>跳事件 <span className="kbd">&lt;</span>
+              <span className="kbd">→</span>5 秒 {kda && (<><span className="kbd">,</span>
+              <span className="kbd">.</span>跳事件 </>)}<span className="kbd">&lt;</span>
               <span className="kbd">&gt;</span>倍速 <span className="kbd">F</span>全螢幕 <span className="kbd">I</span>
               <span className="kbd">O</span>起終點 · 拖曳把手微調
             </span>
           </div>
 
+          {kda && (
           <div className="page-head" style={{ marginTop: 28, marginBottom: 14 }}>
             <h2 className="page-title" style={{ fontSize: 18 }}>
               精華區間 · {ranges.length}
             </h2>
           </div>
-          {ranges.length === 0 ? (
+          )}
+          {!kda ? null : ranges.length === 0 ? (
             <div className="empty" style={{ padding: 28 }}>
               無擊殺
             </div>
@@ -335,6 +342,7 @@ export function MatchDetail({
           )}
         </div>
 
+        {kda && (
         <div className="side-panel">
           <div className="stat-row">
             <div className="stat">
@@ -375,6 +383,7 @@ export function MatchDetail({
             ))}
           </div>
         </div>
+        )}
       </div>
     </div>
   );

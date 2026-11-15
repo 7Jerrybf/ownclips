@@ -95,7 +95,7 @@ export default function App() {
           OwnClips
         </div>
         <button className={`nav-item ${page === "matches" ? "active" : ""}`} onClick={() => go("matches")}>
-          <IconMatches /> 對局 <span className="count num">{matches.length}</span>
+          <IconMatches /> 錄影 <span className="count num">{matches.length}</span>
         </button>
         <button className={`nav-item ${page === "highlights" ? "active" : ""}`} onClick={() => go("highlights")}>
           <IconClips /> 精華 <span className="count num">{clips.length}</span>
@@ -216,6 +216,8 @@ function StatusCard({
         <div className="status-sub">
           {status.mode} · {status.map}
         </div>
+        {/* Manual recordings and games noticed in the foreground report no kills. */}
+        {!status.manual && (
         <div className="status-kd num">
           <span style={{ color: "var(--kill)" }} title="擊殺">
             <IconKill size={13} /> {status.kills}
@@ -227,6 +229,7 @@ function StatusCard({
             <IconAssist size={13} /> {status.assists}
           </span>
         </div>
+        )}
       </div>
     );
   }

@@ -1,7 +1,7 @@
 import { useState } from "react";
 import type { MatchSummary } from "../api";
 import { api } from "../api";
-import { clock, count, type DateRange, gameLabel, inRange, size, timeOf } from "../format";
+import { clock, count, type DateRange, gameLabel, hasKda, inRange, size, timeOf } from "../format";
 import { DayGroups, RangeFilter } from "./DayGroups";
 import { IconAssist, IconDeath, IconFolder, IconKeep, IconKill, IconMatches, IconRefresh, IconTrash } from "./Icons";
 import { Check, SelectBar, useSelection } from "./Selection";
@@ -25,7 +25,8 @@ export function MatchesView({
   const [confirmBulk, setConfirmBulk] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const shown = matches.filter((m) => inRange(m.info.started_at, range));
-  const totalKills = matches.reduce((n, m) => n + count(m.info.events, "kill"), 0);
+  const totalKills = matches.filter((m) => hasKda(m.info.game)).reduce((n, m) => n + count(m.info.events, "kill"), 0);
+  const anyKda = matches.some((m) => hasKda(m.info.game));
   // Only what's on screen counts: switching the date filter drops the rest.
   const selected = shown.filter((m) => sel.picked.has(m.video) && !m.recording);
   const selectedKept = selected.filter((m) => m.info.keep).length;
@@ -46,7 +47,7 @@ export function MatchesView({
     setDeleting(true);
     try {
       const n = await api.deleteMatches(selected.map((m) => m.video));
-      notify(`已移到回收筒 · ${n} 場`, "success");
+      notify(`已移到回收筒 · ${n} 段`, "success");
       clear();
       onChanged();
     } catch (e) {
@@ -90,9 +91,9 @@ export function MatchesView({
     <div className={`page ${selecting ? "selecting" : ""}`}>
       <div className="page-head">
         <div>
-          <h1 className="page-title">對局</h1>
+          <h1 className="page-title">錄影</h1>
           <div className="page-sub num">
-            {matches.length} 場 · {totalKills} 擊殺
+            {matches.length} 段{anyKda && ` · ${totalKills} 擊殺`}
           </div>
         </div>
         <div className="page-actions">
@@ -130,6 +131,7 @@ export function MatchesView({
             const kills = count(m.info.events, "kill");
             const deaths = count(m.info.events, "death");
             const assists = count(m.info.events, "assist");
+            const kda = hasKda(m.info.game);
             const dur = m.info.duration ?? 0;
             const isPicked = sel.picked.has(m.video);
             return (
@@ -175,22 +177,26 @@ export function MatchesView({
                 </div>
                 <div className="card-body">
                   <div className="card-row">
-                    <span className="chip kill num" title="擊殺">
-                      <IconKill size={12} /> {kills}
-                    </span>
-                    <span className="chip death num" title="死亡">
-                      <IconDeath size={12} /> {deaths}
-                    </span>
-                    {assists > 0 && (
-                      <span className="chip assist num" title="助攻">
-                        <IconAssist size={12} /> {assists}
-                      </span>
+                    {kda && (
+                      <>
+                        <span className="chip kill num" title="擊殺">
+                          <IconKill size={12} /> {kills}
+                        </span>
+                        <span className="chip death num" title="死亡">
+                          <IconDeath size={12} /> {deaths}
+                        </span>
+                        {assists > 0 && (
+                          <span className="chip assist num" title="助攻">
+                            <IconAssist size={12} /> {assists}
+                          </span>
+                        )}
+                      </>
                     )}
                     <span className="card-meta" style={{ marginLeft: "auto" }}>
                       {timeOf(m.info.started_at)}
                     </span>
                   </div>
-                  {dur > 0 && (
+                  {kda && dur > 0 && (
                     <div className="mini-timeline">
                       {m.info.events.map((e, i) => (
                         <span
@@ -254,7 +260,7 @@ export function MatchesView({
         onAll={() => pick(selectable(shown))}
         confirming={confirmBulk}
         busy={deleting}
-        warning={selectedKept > 0 ? `含 ${selectedKept} 場已保留` : null}
+        warning={selectedKept > 0 ? `含 ${selectedKept} 段已保留` : null}
         onDelete={() => setConfirmBulk(true)}
         onConfirm={removeSelected}
         onCancel={() => setConfirmBulk(false)}
@@ -270,8 +276,10 @@ function selectable(ms: MatchSummary[]): string[] {
 }
 
 function daySummary(day: MatchSummary[]) {
-  const total = (kind: "kill" | "death" | "assist") => day.reduce((n, m) => n + count(m.info.events, kind), 0);
-  return `${day.length} 場 · ${total("kill")} / ${total("death")} / ${total("assist")}`;
+  const kdaMatches = day.filter((m) => hasKda(m.info.game));
+  const total = (kind: "kill" | "death" | "assist") => kdaMatches.reduce((n, m) => n + count(m.info.events, kind), 0);
+  if (kdaMatches.length === 0) return `${day.length} 段`;
+  return `${day.length} 段 · ${total("kill")} / ${total("death")} / ${total("assist")}`;
 }
 
 /** A representative frame: the middle kill, or a third of the way in. */

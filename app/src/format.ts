@@ -16,6 +16,9 @@ export function size(bytes: number): string {
 
 export const gameLabel: Record<Game, string> = { valorant: "Valorant", league: "英雄聯盟", other: "其他" };
 
+/** Only these games report kills, deaths and assists; other recordings have none. */
+export const hasKda = (game: Game) => game === "valorant" || game === "league";
+
 export const kindLabel: Record<EventKind, string> = { kill: "擊殺", death: "死亡", assist: "助攻" };
 
 /** "Ctrl+Alt+KeyR" -> "Ctrl+Alt+R", "Ctrl+Digit1" -> "Ctrl+1". */

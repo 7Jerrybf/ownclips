@@ -109,7 +109,7 @@ export function HighlightsView({
         <div className="empty">
           <IconClips size={34} />
           <h3>{clips.length === 0 ? "尚無片段" : "無片段"}</h3>
-          {clips.length === 0 && <div>對局 → 設定起點、終點 → ✂ 匯出</div>}
+          {clips.length === 0 && <div>錄影 → 設定起點、終點 → ✂ 匯出</div>}
         </div>
       ) : (
         <DayGroups

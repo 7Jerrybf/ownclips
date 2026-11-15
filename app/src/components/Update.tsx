@@ -75,7 +75,7 @@ export function UpdateCard({ updates, recording }: { updates: Updates; recording
         {installing !== null
           ? `下載中… ${Math.round(installing * 100)}%`
           : recording
-            ? "對局結束後可以更新"
+            ? "錄影結束後可以更新"
             : "更新並重新開啟"}
       </button>
     </div>

@@ -356,7 +356,7 @@ export function SettingsView({
           <div className="field">
             <div className="field-label">
               <b>自動錄其他遊戲</b>
-              <span>遊戲在前景時開始,關閉遊戲或離開 3 分鐘後停止 · Valorant、英雄聯盟照常按對局錄</span>
+              <span>遊戲在前景時開始,關閉遊戲或離開 3 分鐘後停止 · Valorant、英雄聯盟照常整場錄</span>
             </div>
             <button
               className={`switch ${cfg.auto_detect_games ? "on" : ""}`}
